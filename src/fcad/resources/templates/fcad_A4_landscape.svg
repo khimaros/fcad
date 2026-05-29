@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="svg" width="297mm" height="210mm" version="1.1" viewBox="0 0 297 210" xmlns="http://www.w3.org/2000/svg" xmlns:cc="http://creativecommons.org/ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:freecad="https://www.freecad.org/wiki/index.php?title=Svg_Namespace" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+ <metadata id="metadata">
+  <rdf:RDF>
+   <cc:Work rdf:about="">
+    <dc:format>image/svg+xml</dc:format>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <rect id="border" x="7" y="7" width="283" height="196" color="#000000" fill="none" solid-color="#000000" stroke="#000" stroke-width=".5" style="isolation:auto;mix-blend-mode:normal"/>
+ <rect id="block" x="180" y="171" width="110" height="32" color="#000000" fill="none" solid-color="#000000" stroke="#000" stroke-width=".5" style="isolation:auto;mix-blend-mode:normal"/>
+ <path id="r1" d="m180 179h110" color="#000000" fill="none" solid-color="#000000" stroke="#000" stroke-width=".35" style="isolation:auto;mix-blend-mode:normal"/>
+ <path id="r2" d="m180 187h110" color="#000000" fill="none" solid-color="#000000" stroke="#000" stroke-width=".35" style="isolation:auto;mix-blend-mode:normal"/>
+ <path id="r3" d="m180 195h110" color="#000000" fill="none" solid-color="#000000" stroke="#000" stroke-width=".35" style="isolation:auto;mix-blend-mode:normal"/>
+ <path id="c1" d="m235 187v8" color="#000000" fill="none" solid-color="#000000" stroke="#000" stroke-width=".35" style="isolation:auto;mix-blend-mode:normal"/>
+ <text id="lpart" x="182" y="174.6" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%"><tspan id="tlpart" x="182" y="174.6" font-size="2.2px" style="line-height:1.25">PART</tspan></text>
+ <text id="lproj" x="182" y="182.6" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%"><tspan id="tlproj" x="182" y="182.6" font-size="2.2px" style="line-height:1.25">PROJECT</tspan></text>
+ <text id="lscale" x="182" y="190.6" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%"><tspan id="tlscale" x="182" y="190.6" font-size="2.2px" style="line-height:1.25">SCALE</tspan></text>
+ <text id="lunits" x="237" y="190.6" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%"><tspan id="tlunits" x="237" y="190.6" font-size="2.2px" style="line-height:1.25">UNITS</tspan></text>
+ <text id="lsize" x="182" y="198.6" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%"><tspan id="tlsize" x="182" y="198.6" font-size="2.2px" style="line-height:1.25">SIZE</tspan></text>
+ <text id="vpart" x="200" y="178" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%" freecad:editable="Part"><tspan id="tvpart" x="200" y="178" font-size="3.6px" style="line-height:1.25">part</tspan></text>
+ <text id="vproj" x="200" y="186" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%" freecad:editable="Project"><tspan id="tvproj" x="200" y="186" font-size="3.6px" style="line-height:1.25">project</tspan></text>
+ <text id="vscale" x="200" y="194" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%" freecad:editable="Scale"><tspan id="tvscale" x="200" y="194" font-size="3.6px" style="line-height:1.25">1:1</tspan></text>
+ <text id="vunits" x="250" y="194" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%" freecad:editable="Units"><tspan id="tvunits" x="250" y="194" font-size="3.6px" style="line-height:1.25">mm</tspan></text>
+ <text id="vsize" x="200" y="202" color="#000000" fill="#000000" fill-rule="evenodd" font-family="sans" stroke-width="1.7717" style="line-height:0%" freecad:editable="Size"><tspan id="tvsize" x="200" y="202" font-size="3.6px" style="line-height:1.25">-</tspan></text>
+</svg>

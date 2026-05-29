@@ -1,0 +1,18 @@
+"""rebuild the active fcad model from its Parameters VarSet.
+
+installed by `fcad install-macro`, which bakes the path to the installed
+fcad package into the line below. edit the Parameters panel of the open
+assembly, then run this macro: it re-runs the build with those values and reopens
+the linked assembly. the real logic lives in fcad.freecad.rebuild so it stays
+in one place and updates with the package.
+"""
+
+import sys
+
+_PKG_PARENT = r"__FCAD_PKG_PARENT__"
+if _PKG_PARENT and _PKG_PARENT not in sys.path:
+    sys.path.insert(0, _PKG_PARENT)
+
+from fcad.freecad import rebuild
+
+rebuild.run()
