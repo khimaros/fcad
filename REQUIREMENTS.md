@@ -105,8 +105,11 @@ never regress on them.
   on the assembly must remain available, since orbiting the finished model is a
   distinct thing to want. `assemble` names a part target is an error, not a
   silent whole-model animation.
-  clip length and frame rate are set by `--seconds` and `--fps` on both
-  animators; the frame count is their product rather than a third setting.
+  a clip's length is derived from what it shows, not set: an assembly's follows
+  from its part count and how many parts move at once, so twenty arriving singly
+  runs far longer than three. `--speed` multiplies that, `--fps` sets the frame
+  rate, and the frame count is their product rather than a third setting;
+  `--seconds` forces an exact length when one is needed.
   `assemble` is driven by the part STLs plus `<name>-placements.json` and
   `<name>-parts.json`, never the assembly STL, which is one welded lump with no
   part boundaries left in it. the arrival order (`--order`) defaults to

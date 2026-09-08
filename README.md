@@ -286,11 +286,16 @@ fcad fem-animate --subject modes                   # just the eigenmodes
 fcad animate                                       # the assembly, building itself
 fcad animate --subject static                      # or just orbit the finished model
 fcad animate beam --camera turntable               # a single part, level spin
-fcad animate --seconds 20 --fps 24                 # longer and smoother
+fcad animate --speed 0.5 --fps 24                  # half speed, smoother
 ```
 
-`--seconds` sets the clip length and `--fps` the frame rate, on both animators;
-the frame count is their product, not a third thing to specify.
+`--speed` is a multiplier, not a duration, because a clip already has a length
+its content implies: an assembly of twenty parts arriving one at a time is a
+genuinely longer film than one of three (25s against 4.6s), and `FCAD_AT_ONCE`
+moves it too. asking for both in the same fixed seconds would make one of them a
+blur. `--seconds` still forces an exact length when a slot has to be filled, and
+`--fps` sets the frame rate; the frame count is their product, never a third
+thing to specify.
 
 the cameras are one motion at three amplitudes: `orbit` turns and sweeps its
 elevation so the top and underside come into view, `turntable` turns level, and
@@ -326,11 +331,11 @@ screw home between the two plates; `grounded` does not.
 `--order bottom-up|top-down|declared` are the escape hatches.
 
 `FCAD_AT_ONCE` (default 3) caps how many parts are in the air together, and 1
-makes it strictly sequential -- each part landing before the next leaves. it is a
-concurrency rather than a flight duration because a fixed duration does not
-survive the part count: at a duration that looks right for three parts, twenty
-converge twenty-deep and read as an explosion running backwards. lengthening the
-clip with `--seconds` changes the pace and nothing else.
+makes it strictly sequential -- each part landing before the next leaves, which
+lengthens the clip rather than speeding up the landings. it is a concurrency
+rather than a flight duration because a fixed duration does not survive the part
+count: at a duration that looks right for three parts, twenty converge
+twenty-deep and read as an explosion running backwards.
 
 the mesh is second-order, which matters more than it sounds: the 4-node tets
 FreeCAD meshes with by default are over-stiff in bending and understate deflection

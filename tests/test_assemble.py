@@ -129,7 +129,7 @@ def _timing_checks():
     """arrival is a smoothstep over each part's slice of the clip."""
     a = [assemble.arrival(f / 20.0, 0, 4) for f in range(21)]
     last = [assemble.arrival(f / 20.0, 3, 4) for f in range(21)]
-    half = 0.5 * assemble.flight_for(4)
+    half = 0.5 * assemble.FLIGHT_SECONDS / assemble.duration(4)
     return [
         ("a part starts away from home", a[0] == 0.0),
         ("and ends at home", a[-1] == 1.0),
@@ -167,21 +167,34 @@ def _concurrency_checks():
 
 
 def _length_checks():
-    """R4.3: --seconds/--fps set the clip; the frame count is their product.
+    """R4.3: the clip's length is derived from the model, and speed scales it.
 
-    arrival works in fractions of the loop, so lengthening a clip changes its
-    pace and nothing else - the concurrency and the ordering are untouched."""
-    from fcad.render import MESH_SECONDS, render
+    a fixed length is the wrong control here. twenty parts arriving one at a
+    time is a genuinely longer film than three, and forcing both into the same
+    seconds makes one of them a blur - so the concurrency and the part count
+    have to move the duration, and `--speed` multiplies whatever results."""
+    from fcad.render import render
+    solo = assemble.duration(1)
     return [
+        ("more parts means a longer clip",
+         assemble.duration(20) > assemble.duration(3) > solo),
+        ("and fewer in the air at once means longer still",
+         assemble.duration(20, 1) > assemble.duration(20, 4)),
+        ("sequential twenty is far longer than sequential three (%.1fs vs %.1fs)"
+         % (assemble.duration(20, 1), assemble.duration(3, 1)),
+         assemble.duration(20, 1) > 4 * assemble.duration(3, 1)),
+        ("a single part is just its flight plus the settling beat",
+         abs(solo - (assemble.FLIGHT_SECONDS + assemble.SETTLE_SECONDS)) < 1e-9),
+        ("speed 2 halves whatever the length would have been",
+         abs(render.length(10.0, speed=2.0) - 5.0) < 1e-9),
+        ("speed 0.5 doubles it", abs(render.length(10.0, speed=0.5) - 20.0) < 1e-9),
+        ("an explicit length overrides speed, for filling an exact slot",
+         abs(render.length(10.0, seconds=3.0, speed=99.0) - 3.0) < 1e-9),
         ("frames are seconds x fps", render.frames_for(6, 12) == 72),
-        ("a longer clip is proportionally more frames",
-         render.frames_for(12, 12) == 2 * render.frames_for(6, 12)),
         ("a higher rate is proportionally more frames",
          render.frames_for(6, 24) == 2 * render.frames_for(6, 12)),
         ("a degenerate request still writes something playable",
-         render.frames_for(0, 12) == 2 and render.frames_for(-5, 12) == 2),
-        ("the default length is shared with the cli, not duplicated",
-         render.frames_for(MESH_SECONDS, 10) == 72),
+         render.frames_for(0, 12) == 2 and render.length(0, speed=0) > 0),
     ]
 
 

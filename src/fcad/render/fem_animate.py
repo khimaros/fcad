@@ -14,7 +14,8 @@ written as mp4 + gif like animate.py, over two orthogonal axes:
 
 reads the FreeCAD/VTK-free .npz from `fcad fem`. every motion completes a whole
 number of cycles per loop, so the gif/mp4 loop without a visible seam.
-  env: FCAD_SECONDS (clip length, default 4.0), FCAD_FPS (12), FCAD_DPI (90),
+  env: FCAD_SPEED (playback multiplier, default 1), FCAD_FPS (12), FCAD_DPI (90),
+       FCAD_SECONDS (force an exact length; a clip's natural one is 4.0),
        FCAD_FEM_DEFORM (peak deflection as a fraction of model size, 0.08),
        FCAD_FEM_CYCLES (flex cycles per orbit, 4),
        FCAD_ELEV/FCAD_AZIM/FCAD_TILT (the camera, as for every other renderer),
@@ -88,10 +89,12 @@ def _clip(nodes, tris, field, mode_disp, peak_scale, title, stem, label,
 
 
 def animate(target="assembly", stem=None, name=None, dist=None,
-            camera="orbit", subject="all", seconds=None, fps=None):
+            camera="orbit", subject="all", seconds=None, fps=None, speed=None):
     name, dist = render._resolve(name, dist)
     fps = max(1, int(fps or FPS))
-    frames = render.frames_for(seconds or SECONDS, fps)
+    # a flex cycle or a mode has no part count to make it longer, so its natural
+    # length is just the default; speed scales it as it does an assembly.
+    frames = render.frames_for(render.length(SECONDS, seconds, speed), fps)
     clip = lambda *a, **kw: _clip(*a, frames=frames, fps=fps, **kw)
     data = np.load(fem_render.npz_path(target, name, dist))
     nodes, tris = data["nodes"], data["tris"]

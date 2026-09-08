@@ -28,6 +28,19 @@ WOOD = (0.82, 0.71, 0.55)
 ELEV = float(os.environ.get("FCAD_ELEV", 22))
 AZIM = float(os.environ.get("FCAD_AZIM", -58))
 TILT = float(os.environ.get("FCAD_TILT", 62))
+SPEED = float(os.environ.get("FCAD_SPEED", 1.0))   # playback multiplier
+
+
+def length(natural, seconds=None, speed=None):
+    """the clip's length: its natural one, scaled by speed, or overridden.
+
+    a clip has a length its content implies - an assembly of twenty parts
+    arriving one at a time is a longer film than one of three - so speed is a
+    multiplier over that rather than a duration anyone has to work out. `seconds`
+    is still there for when a slot has to be filled exactly, and it wins."""
+    if seconds:
+        return max(1e-3, float(seconds))
+    return max(1e-3, float(natural) / max(1e-6, float(speed or SPEED)))
 
 
 def frames_for(seconds, fps):

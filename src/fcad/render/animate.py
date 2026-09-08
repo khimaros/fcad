@@ -23,12 +23,19 @@ fem_animate: `orbit` spins a full turn while the elevation sweeps one cycle so
 every side including top and underside comes into view, `turntable` spins level,
 and `fixed` holds FCAD_ELEV/FCAD_AZIM. an stl has nothing to animate, so this is
 the camera half of the same vocabulary fem-animate uses for both halves.
-  env: FCAD_SECONDS (clip length, default 7.2), FCAD_FPS (10), FCAD_DPI (90),
+the clip's length is derived, not set: an assembly of twenty parts arriving one
+at a time is a longer film than one of three, so FCAD_AT_ONCE and the part count
+move the duration and FCAD_SPEED scales whatever results.
+  env: FCAD_SPEED (playback multiplier, default 1), FCAD_FPS (10), FCAD_DPI (90),
+       FCAD_SECONDS (force an exact length, overriding speed; a spin's natural
+       length is 7.2),
        FCAD_ELEV/FCAD_AZIM (viewpoint, or an orbit's centre/start),
        FCAD_TILT (elevation sweep amplitude, 62; 0 = no sweep),
        FCAD_CLUSTER (grid mm, default 4; 0 disables),
-       FCAD_AT_ONCE (parts in the air at once while assembling, default 3),
-       FCAD_EXPLODE/FCAD_SETTLE/FCAD_CONTACT (see assemble.py)
+       FCAD_AT_ONCE (parts in the air at once while assembling, default 3;
+       1 is strictly sequential, and lengthens the clip accordingly),
+       FCAD_EXPLODE/FCAD_FLIGHT_SECONDS/FCAD_SETTLE_SECONDS/FCAD_CONTACT
+       (see assemble.py)
 """
 
 import os
@@ -49,11 +56,14 @@ CLUSTER = float(os.environ.get("FCAD_CLUSTER", 4.0))
 
 
 def _static(fig, target, name, dist):
-    """the whole model, still: the camera is the only thing that moves."""
+    """the whole model, still: the camera is the only thing that moves.
+
+    returns (axes, poser, natural length) like _assemble; one orbit has nothing
+    in it to make longer or shorter, so its length is simply the default."""
     tris = render.cluster(render.load_tris(target, name, dist), CLUSTER)
     ax = render.make_axes(fig, tris)
     ax.set_title("%s  (%d triangles)" % (target, len(tris)))
-    return ax, lambda frac: None
+    return ax, lambda frac: None, SECONDS
 
 
 def _assemble(fig, target, name, dist, how):
@@ -91,19 +101,20 @@ def _assemble(fig, target, name, dist, how):
         colls.set_verts(np.concatenate(placed))
 
     pose(0.0)
-    return ax, pose
+    return ax, pose, assemble.duration(len(parts))
 
 
 def animate(target="assembly", stem=None, name=None, dist=None, camera="orbit",
-            subject="assemble", order="grounded", seconds=None, fps=None):
+            subject="assemble", order="grounded", seconds=None, fps=None,
+            speed=None):
     name, dist = render._resolve(name, dist)
     fps = max(1, int(fps or FPS))
-    frames = render.frames_for(seconds or SECONDS, fps)
     fig = plt.figure(figsize=(8, 8))
     if subject == "assemble":
-        ax, pose = _assemble(fig, target, name, dist, order)
+        ax, pose, natural = _assemble(fig, target, name, dist, order)
     else:
-        ax, pose = _static(fig, target, name, dist)
+        ax, pose, natural = _static(fig, target, name, dist)
+    frames = render.frames_for(render.length(natural, seconds, speed), fps)
     render.aim(ax)
 
     def update(i):

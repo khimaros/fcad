@@ -48,9 +48,15 @@ EXPLODE = float(os.environ.get("FCAD_EXPLODE", 1.6))
 # the flight from it holds the picture steady from three parts to fifty. 1 is
 # strictly sequential: each part lands before the next leaves.
 AT_ONCE = max(1, int(os.environ.get("FCAD_AT_ONCE", 3)))
-# a beat at the end with everything in place, so the finished model is actually
-# looked at rather than glimpsed on the last frame.
-SETTLE = float(os.environ.get("FCAD_SETTLE", 0.12))
+# seconds one part spends in the air, and the beat at the end with everything in
+# place so the finished model is looked at rather than glimpsed on the last
+# frame. both at speed 1, and both in *seconds* rather than fractions of the clip
+# because the clip's length is derived from them and the model, not fixed: more
+# parts, or fewer of them in the air at once, means a longer animation. that is
+# the point. a fixed total would squeeze twenty sequential landings into the same
+# time as three, and each one would be a blur.
+FLIGHT_SECONDS = float(os.environ.get("FCAD_FLIGHT_SECONDS", 1.2))
+SETTLE_SECONDS = float(os.environ.get("FCAD_SETTLE_SECONDS", 1.0))
 # mm of slack when deciding two instances touch. a built model's parts meet
 # exactly, but its stls are faceted and then decimated onto a grid, so "exactly"
 # needs a tolerance wider than the decimation moved anything.
@@ -204,28 +210,34 @@ def offsets(parts):
     return out
 
 
-def flight_for(count, at_once=AT_ONCE):
-    """the fraction of the clip one part spends in the air.
+def spacing_for(at_once=AT_ONCE):
+    """seconds between one part's departure and the next.
 
-    solved from the concurrency rather than fixed: `at_once` flights of this
-    length, spaced evenly, exactly fill the clip up to its settling beat."""
-    usable = max(1e-6, 1.0 - SETTLE)
-    n = max(1, int(at_once))
-    return usable if count <= 1 else usable * n / float(count - 1 + n)
+    a flight divided by the concurrency: at 1 each part lands before the next
+    leaves, at 4 four are in the air at any moment."""
+    return FLIGHT_SECONDS / max(1, int(at_once))
+
+
+def duration(count, at_once=AT_ONCE):
+    """seconds the assembly clip runs at speed 1, derived from the model.
+
+    this is the whole reason the length is not a setting: twenty parts arriving
+    one at a time is a genuinely longer film than three, and asking for both in
+    the same seconds makes one of them unreadable."""
+    return (spacing_for(at_once) * max(0, count - 1)
+            + FLIGHT_SECONDS + SETTLE_SECONDS)
 
 
 def arrival(frac, index, count, at_once=AT_ONCE):
     """0 (not yet placed) .. 1 (home) for one part at loop position `frac`.
 
-    departures are spread so that the *last* flight lands on the settling beat -
-    over `usable - flight`, not over `usable`, which would leave the final part
-    still in the air when the clip ends and the model never seen whole. the ease
-    is a smoothstep: it leaves and arrives at rest, which is what stops each
+    departures are spaced by `spacing_for`, so the last one lands exactly as the
+    settling beat begins and the model is seen whole before the clip ends. the
+    ease is a smoothstep: it leaves and arrives at rest, which is what stops each
     landing looking like a collision."""
-    usable = max(1e-6, 1.0 - SETTLE)
-    flight = flight_for(count, at_once)
-    span = max(0.0, usable - flight)
-    start = span * index / (count - 1) if count > 1 else 0.0
+    total = duration(count, at_once)
+    flight = FLIGHT_SECONDS / total
+    start = (spacing_for(at_once) / total) * index
     t = (frac - start) / max(1e-6, flight)
     t = min(1.0, max(0.0, t))
     return t * t * (3.0 - 2.0 * t)

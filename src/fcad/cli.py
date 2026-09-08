@@ -17,8 +17,7 @@ from fcad import __version__, config, cutlist
 from fcad._run import run_entry
 # the animation vocabulary only; fcad.render is import-free at package level, so
 # naming these in --help costs nothing (importing the renderers pulls matplotlib).
-from fcad.render import (CAMERAS, FEM_SECONDS, MESH_SECONDS, MESH_SUBJECTS,
-                         ORDERS, SUBJECTS)
+from fcad.render import CAMERAS, FEM_SECONDS, MESH_SUBJECTS, ORDERS, SUBJECTS
 
 # headless build/validate commands handled by freecad/_entry's dispatch path.
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
@@ -95,8 +94,11 @@ def _build_parser():
                         "holds the model whole. default: assemble for the "
                         "assembly, static for a single part, which has nothing "
                         "to assemble")
+    a.add_argument("--speed", type=float, metavar="N",
+                   help="playback multiplier over the length the clip implies "
+                        "(2 = twice as fast; default 1)")
     a.add_argument("--seconds", type=float, metavar="N",
-                   help="clip length (default %g)" % MESH_SECONDS)
+                   help="force an exact length instead, overriding --speed")
     a.add_argument("--fps", type=int, metavar="N",
                    help="frames per second; raise for smoother, lower for a "
                         "smaller file (default 10)")
@@ -126,8 +128,11 @@ def _build_parser():
     fa.add_argument("--camera", choices=CAMERAS, default="orbit",
                     help="orbit every side incl. the underside (default), spin "
                         "level, or hold FCAD_ELEV/FCAD_AZIM")
+    fa.add_argument("--speed", type=float, metavar="N",
+                    help="playback multiplier (2 = twice as fast; default 1)")
     fa.add_argument("--seconds", type=float, metavar="N",
-                    help="length of each clip (default %g)" % FEM_SECONDS)
+                    help="force an exact length for each clip instead, "
+                         "overriding --speed (natural %g)" % FEM_SECONDS)
     fa.add_argument("--fps", type=int, metavar="N",
                     help="frames per second; raise for smoother, lower for a "
                          "smaller file (default 12)")
@@ -321,7 +326,7 @@ def main(argv=None):
                                    ("assembly", cfg.name) else "static")
         animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist,
                         camera=args.camera, subject=subject, order=args.order,
-                        seconds=args.seconds, fps=args.fps)
+                        seconds=args.seconds, fps=args.fps, speed=args.speed)
         return 0
     if cmd == "fem":
         env = {"FCAD_TARGET": args.target}
@@ -338,7 +343,7 @@ def main(argv=None):
         from fcad.render import fem_animate
         fem_animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist,
                             camera=args.camera, subject=args.subject,
-                            seconds=args.seconds, fps=args.fps)
+                            seconds=args.seconds, fps=args.fps, speed=args.speed)
         return 0
     if cmd in ("diff", "diff-build", "diff-open"):
         from fcad import diff

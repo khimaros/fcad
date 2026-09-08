@@ -19,9 +19,11 @@ CAMERAS = ("orbit", "turntable", "fixed")
 SUBJECTS = ("all", "flex", "static", "modes")
 MESH_SUBJECTS = ("static", "assemble")
 ORDERS = ("grounded", "bottom-up", "top-down", "declared")
-# default clip lengths, in seconds. here rather than beside the animators that
-# apply them so `--help` can name them without importing matplotlib. they differ
-# because the subjects do: a model assembling itself part by part needs longer
-# than a beam flexing once.
+# natural clip lengths in seconds, for the subjects that have nothing in them to
+# imply one - a camera orbit, a flex cycle, a mode. an assembly's length is
+# derived from its part count and concurrency instead (assemble.duration), since
+# twenty parts landing one at a time is a longer film than three. `--speed`
+# scales whichever applies. FEM_SECONDS lives here rather than beside the
+# animator so `--help` can name it without importing matplotlib.
 MESH_SECONDS = 7.2
 FEM_SECONDS = 4.0
