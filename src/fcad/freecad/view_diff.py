@@ -14,8 +14,9 @@ import FreeCAD as App
 
 try:
     import FreeCADGui as Gui
+    from PySide import QtWidgets
 except Exception:
-    Gui = None
+    Gui = QtWidgets = None
 
 GREEN = (0.0, 0.8, 0.0)
 RED = (0.85, 0.0, 0.0)
@@ -30,7 +31,7 @@ def _color(name):
         return GREEN
     if "_removed" in name:
         return RED
-    return GREY  # _unchanged, _changed
+    return GREY  # _unchanged
 
 
 def main():
@@ -39,14 +40,22 @@ def main():
     # the diff doc is baked solids (nothing parametric), so opening is read-only.
     if Gui is None:
         return
+    # a freecadcmd-built document carries no gui state, so *every* object opens
+    # hidden - the layer groups as well as the solids in them. showing only the
+    # solids drew the geometry but left each layer's own row switched off, so the
+    # tree said hidden while the model said visible, and toggling a layer did
+    # nothing until it had been clicked twice.
     for o in doc.Objects:
-        if o.TypeId != "Part::Feature" or o.ViewObject is None:
+        if o.ViewObject is None:
             continue
         try:
-            o.ViewObject.ShapeColor = _color(o.Name)
+            if o.TypeId == "Part::Feature":
+                o.ViewObject.ShapeColor = _color(o.Name)
             o.ViewObject.Visibility = True
         except Exception:
             pass
+    for _ in range(20):
+        QtWidgets.QApplication.processEvents()
     view = Gui.activeDocument().activeView()
     view.viewIsometric()
     Gui.SendMsgToActiveView("ViewFit")

@@ -15,10 +15,14 @@ is the reliable channel).
 """
 
 import csv
+import math
 import os
+import re
 import shutil
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
@@ -112,6 +116,46 @@ def main():
         ck("auto-grounded: no unconstrained components (%s)" % (free or "none"), not free)
         ck("no interfering parts", not build_assembly.find_overlaps(project, vals))
 
+        # --- the artifacts open showing the fitted model, not an empty 3d view ---
+        def fits(cam, bb, tag):
+            """the camera frames the whole model isometrically: ortho height is
+            the box diagonal and the eye sits half a diagonal out along
+            (1,-1,1). measured against the gui's own viewIsometric + ViewFit."""
+            if not cam or bb is None:
+                ck("%s bakes a camera" % tag, False)
+                return
+            d = bb.DiagonalLength
+            off = d / (2.0 * math.sqrt(3.0))
+            want = [bb.Center.x + off, bb.Center.y - off, bb.Center.z + off]
+            ck("%s camera height = the bbox diagonal (%.1f)" % (tag, d),
+               abs(cam["height"][0] - d) < 0.01)
+            ck("%s camera focal = half the diagonal" % tag,
+               abs(cam["focalDistance"][0] - d / 2.0) < 0.01)
+            ck("%s camera framed on the model, isometric" % tag,
+               all(abs(a - b) < 0.01 for a, b in zip(cam["position"], want)))
+
+        vis, types, cam, bb = view_state(asm)
+        of = lambda t: [n for n, ty in types.items() if ty == t]
+        links = of("App::Link")
+        ck("assembly bakes gui view state", bool(vis))
+        ck("assembly links open visible (%d)" % len(links),
+           bool(links) and all(vis.get(n) for n in links))
+        ck("assembly container opens visible",
+           all(vis.get(n) for n in of("Assembly::AssemblyObject")))
+        ck("assembly origin planes stay hidden",
+           not any(vis.get(n) for n in of("App::Plane")))
+        fits(cam, bb, "assembly")
+
+        vis, types, cam, bb = view_state(os.path.join(d["parts"], "plate.FCStd"))
+        of = lambda t: [n for n, ty in types.items() if ty == t]
+        solids = of("Part::Feature")
+        ck("part bakes gui view state", bool(vis))
+        ck("part solid opens visible (%d)" % len(solids),
+           bool(solids) and all(vis.get(n) for n in solids))
+        ck("part defining sketch stays hidden",
+           not any(vis.get(n) for n in of("Sketcher::SketchObject")))
+        fits(cam, bb, "part")
+
         # bom: qty from placements, length from the explicit value / bbox
         with open(os.path.join(d["dist"], project.name + "-bom.csv")) as f:
             bom = {r["part"]: r for r in csv.DictReader(f)}
@@ -178,6 +222,41 @@ def main():
 def dispatch_dirs(project):
     from fcad.freecad import dispatch
     return dispatch.dirs(project)
+
+
+def view_state(path):
+    """({name: visible}, {name: TypeId}, {camera field: floats}, visible bbox).
+
+    visibility and camera live in the zip's GuiDocument.xml, which freecadcmd
+    cannot write itself; the build bakes one so the file opens showing the fitted
+    model instead of an empty 3d view. the bbox is unioned here independently of
+    the builder, so the camera arithmetic is checked rather than echoed."""
+    vis, cam = {}, {}
+    with zipfile.ZipFile(path) as z:
+        if "GuiDocument.xml" in z.namelist():
+            root = ET.fromstring(z.read("GuiDocument.xml"))
+            for vp in root.iter("ViewProvider"):
+                for prop in vp.iter("Property"):
+                    if prop.get("name") == "Visibility":
+                        vis[vp.get("name")] = prop.find("Bool").get("value") == "true"
+            node = root.find("Camera")
+            for key in ("position", "height", "focalDistance"):
+                m = re.search(r"\b%s\s+([-\d.e ]+)" % key,
+                              node.get("settings") if node is not None else "")
+                if m:
+                    cam[key] = [float(v) for v in m.group(1).split()]
+    doc = App.openDocument(path)
+    try:
+        types = {o.Name: o.TypeId for o in doc.Objects}
+        bb = None
+        for o in doc.Objects:
+            shape = getattr(o, "Shape", None) if vis.get(o.Name) else None
+            if shape is None or shape.isNull():
+                continue
+            bb = shape.BoundBox if bb is None else bb.united(shape.BoundBox)
+    finally:
+        App.closeDocument(doc.Name)
+    return vis, types, cam, bb
 
 
 if any(a.endswith("test_contract.py") for a in sys.argv):

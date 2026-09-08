@@ -80,8 +80,11 @@ def build_one(project, spec, values, dirs, formats):
     # save the part file before the drawing exports: dxf/drawing/sketch all add
     # TechDraw pages to the document, and we want the saved .FCStd to contain
     # only the part (varset + sketch + solid) so it opens straight to the model.
+    # the gui state is baked here for the same reason: only these objects are in
+    # the file we just wrote.
     if "fcstd" in formats:
         doc.saveAs(stem + ".FCStd")
+        fcutil.export_gui_state(doc, stem + ".FCStd")
     if "dxf" in formats:
         fcutil.export_dxf(doc, [obj], stem + ".dxf")
     if "drawing" in formats:

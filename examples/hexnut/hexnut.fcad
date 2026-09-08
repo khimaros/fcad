@@ -1,0 +1,43 @@
+# -*- mode: python -*- vim: ft=python
+"""a hexagonal plate with a vertical hole through its center, defined by its sketch.
+
+the smallest project that exercises the sketch path: `profile2d` hands fcad the
+closed outline plus the thickness, `holes` puts the bore in that same sketch (and
+on the dimensioned drawing), and the `solid` thunk cuts the matching cylinder.
+the defining sketch lies in XY at z = -thickness/2, so a hole listed there is
+already a vertical bore.
+
+outline and solid are both centered on the origin, baked into the geometry rather
+than translated, so the assembly's placement cannot shift the part.
+"""
+
+import math
+
+import fcad, Part, FreeCAD as App
+
+SIDES = 6
+
+PARAMS = {"across_flats": 75.0, "thickness": 30.0, "hole_dia": 20.0}
+
+
+def _outline(across_flats):
+    r = across_flats / math.sqrt(3.0)
+    step = 2.0 * math.pi / SIDES
+    return [(r * math.cos(i * step), r * math.sin(i * step)) for i in range(SIDES)]
+
+
+def _solid(points, thickness, hole_dia):
+    face = Part.Face(Part.makePolygon(
+        [App.Vector(x, y, -thickness / 2.0) for x, y in points + points[:1]]))
+    bore = Part.makeCylinder(hole_dia / 2.0, thickness,
+                             App.Vector(0, 0, -thickness / 2.0), App.Vector(0, 0, 1))
+    return face.extrude(App.Vector(0, 0, thickness)).cut(bore)
+
+
+def compute(p):
+    t, d = p["thickness"], p["hole_dia"]
+    points = _outline(p["across_flats"])
+    return [fcad.Part("hex", placements=[App.Placement()],
+                      solid=lambda: _solid(points, t, d),
+                      profile2d=(points, t),
+                      holes=[(0.0, 0.0, d)])]

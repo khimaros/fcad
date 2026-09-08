@@ -94,14 +94,15 @@ fcad pdf                  dimensioned techdraw pdfs
 fcad clean                remove dist/
 fcad info                 print the resolved configuration
 fcad install-macro        install the rebuild macro into FreeCAD's macro dir
+fcad install-git          make `git diff` on a .fcad file open the 3d diff
 fcad help [COMMAND]       show usage (top-level, or for one command)
 ```
 
 `TARGET` is `assembly` (default) or a part name (e.g. `corner_post`). the 3d diff
-is split because computing it is slow: `diff-build` bakes the green/red/grey split
-to `dist/<target>.diff.FCStd` (run it in the background for a big assembly),
-`diff-open` opens that instantly, and `diff` chains the two. see a project's
-Makefile (e.g. the `planter` repo) for canonical, incremental invocations.
+is split into a compute step and a view step: `diff-build` bakes the green/red/grey
+split to `dist/<target>.diff.FCStd`, `diff-open` opens that instantly, and `diff`
+chains the two. see a project's Makefile (e.g. the `planter` repo) for canonical,
+incremental invocations.
 
 ### a typical session
 
@@ -114,12 +115,90 @@ fcad view            # eyeball the assembly in the gui
 fcad diff            # what changed vs git HEAD, in 3d
 ```
 
+the built `.FCStd` files open ready to look at, whether through `fcad view` or a
+plain double-click in FreeCAD: the part solids, the assembly's components and the
+assembly itself are visible, the defining sketches and origin geometry are not,
+and the camera is already an isometric fit of the model. the build bakes that
+view state itself, with no display involved.
+
 while iterating, `fcad build <TARGET>` rebuilds a single artifact (e.g.
 `fcad build assembly`) for a fast loop. to tweak parameters live in the gui,
 `fcad install-macro` once, then run `fcad_rebuild` from FreeCAD's Macro menu: it
 reads the open document's `Parameters` panel and regenerates it. that indirection
 is needed because part and hole **counts** are parametric, so a plain recompute
 cannot add or remove objects.
+
+## 3d diff (what changed vs git HEAD)
+
+`fcad diff` builds the committed design in a throwaway `git worktree` and shows
+the two side by side as one model in three toggleable layers: **green** material
+this revision adds, **red** material it removes, **grey** everything untouched.
+
+the diff is per part. each part type is diffed against its own previous version
+once, in its own frame, and the result is then placed at each of its instances -
+a transform, not a boolean. so the cost tracks the number of part types you
+*changed*, not the number of parts in the model, and a revision that only moves
+things around or changes a quantity costs no booleans at all. on the planter
+(190 instances, 11 part types, 3 of them changed) the whole of `fcad diff-build`
+is about 11s, most of it rebuilding the HEAD geometry.
+
+because a part is only ever compared against itself, the layers answer "what
+changed about each part" rather than "what matter sits here now": if a screw
+moves out of a space a board grows into, you see the screw in red and the board
+in green in the same place, which is the honest per-part answer.
+
+pairing instances needs both revisions' placements, and the diff cannot ask the
+project for them twice (the two answers live in two different revisions of your
+code), so every build records them in `dist/<name>-placements.json`. build before
+you diff; `fcad diff` says so if that file is missing.
+
+### from `git diff`
+
+if you commit `dist/`, `git diff` on a built `.FCStd` says "Binary files differ"
+and tells you nothing. `fcad install-git` registers fcad as this repo's diff
+driver for those documents, so it shows you the model instead:
+
+```
+fcad install-git
+git diff                                    # 3d, not "binary files differ"
+git diff HEAD~3 -- dist/parts/corner_post.FCStd
+```
+
+git hands the driver both revisions as files, so this compares whatever you asked
+git to compare — a branch, a tag, three commits back — and builds nothing, since
+both sides are already-built documents. a file missing on one side (`/dev/null`
+to git) reads as wholly added, or removed.
+
+git diffs one file at a time, and the two kinds of document record different
+things, so you get one 3d view per changed file:
+
+- a **part** document holds its own solid, so it diffs as **geometry** — what
+  changed about that part's shape;
+- an **assembly** document holds no geometry at all, only links into the part
+  files, so it diffs as **placements** — instances added, removed or moved. that
+  is exactly what the file records; a part's shape changing is a change to the
+  part file, which git diffs separately.
+
+your `.fcad` source is deliberately *not* bound: it is python, it diffs perfectly
+well as text, and that is what we ask forges to render it as. use `fcad diff` for
+the whole-design view.
+
+`install-git` also writes a tracked `.gitattributes` marking `.fcad` as Python, so
+GitHub and GitLab render your design as source instead of plain text and count it
+in the repo's language stats:
+
+```
+*.fcad linguist-language=Python gitlab-language=python
+```
+
+the two attributes land in different files, and which goes where is forced, not a
+preference. git will not run a command a tracked file names (a clone would then
+execute code it shipped), so the diff driver has to be local: `.git/config` plus
+`.git/info/attributes`, with teammates running `fcad install-git` once each. a
+forge only ever reads committed files, so the language hint has to be the tracked
+`.gitattributes` — commit it. that file is the only thing in your working tree
+`install-git` touches. undo the local half with
+`git config --local --unset diff.fcad.command`.
 
 ## cut list (what to buy)
 

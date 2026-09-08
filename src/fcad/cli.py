@@ -95,6 +95,13 @@ def _build_parser():
     m = sub.add_parser("install-macro", help="install the rebuild macro into FreeCAD")
     m.add_argument("--dir", metavar="DIR", dest="macro_dir",
                    help="macro directory (default ~/.local/share/FreeCAD/Macro)")
+    sub.add_parser("install-git",
+                   help="make `git diff` on a .fcad file open the 3d diff")
+    g = sub.add_parser("git-diff",
+                       help="git's external diff driver (git calls this itself; "
+                            "register it with install-git)")
+    g.add_argument("args", nargs="*", metavar="ARG",
+                   help="path old-file old-hex old-mode new-file new-hex new-mode")
     h = sub.add_parser("help", help="show usage (optionally for one command)")
     h.add_argument("topic", nargs="?", metavar="[COMMAND]")
     p.subparsers = sub
@@ -195,6 +202,12 @@ def main(argv=None):
         from fcad import diff
         fn = {"diff": diff.run, "diff-build": diff.build, "diff-open": diff.open_}[cmd]
         return fn(cfg, args.target)
+    if cmd == "install-git":
+        from fcad import diff
+        return diff.install_git(cfg)
+    if cmd == "git-diff":
+        from fcad import diff
+        return diff.git_diff(cfg, args.args)
     if cmd == "clean":
         _clean(cfg)
         return 0

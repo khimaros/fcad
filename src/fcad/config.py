@@ -25,6 +25,15 @@ ENV_FREECAD_GUI = "FREECAD_GUI"
 DEFAULT_FREECAD = "freecadcmd"
 DEFAULT_FREECAD_GUI = "freecad"
 
+# the per-instance placements every assembly build records for the 3d diff. it
+# lives here because both sides need it: the builder writes it inside freecadcmd,
+# the diff orchestrator reads it under the cli's own python.
+PLACEMENTS_SUFFIX = "-placements.json"
+
+
+def placements_path(dist, name):
+    return os.path.join(dist, name + PLACEMENTS_SUFFIX)
+
 
 @dataclass
 class Config:

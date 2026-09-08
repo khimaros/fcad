@@ -235,6 +235,7 @@ def build_jointed_doc(project, values, data, parts_dir, path):
     for o in doc.Objects:
         o.purgeTouched()
     doc.save()
+    fcutil.export_gui_state(doc, path)
     App.closeDocument(doc.Name)
     for pd in part_docs:
         App.closeDocument(pd.Name)
@@ -243,6 +244,12 @@ def build_jointed_doc(project, values, data, parts_dir, path):
 def build(project, values, dirs, formats):
     data = project.compute(values)
     specs = data["specs"]
+
+    # always: the 3d diff needs both revisions' placements to pair instances, and
+    # it only ever sees dist/, never the project code that produced them.
+    fcutil.export_placements(
+        {spec.name: spec.placements for spec in specs},
+        fcutil.placements_path(dirs["dist"], project.name))
 
     if "bom" in formats:
         write_bom(specs, os.path.join(dirs["dist"], project.name + "-bom.csv"))

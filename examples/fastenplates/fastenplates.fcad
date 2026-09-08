@@ -1,0 +1,84 @@
+# -*- mode: python -*- vim: ft=python
+"""two lapped plates held together by one screw: a minimal fcad assembly.
+
+both plates are the *same* part placed twice, the second rotated 180 degrees
+about Z, so a single drilled sketch serves both ends of the lap and the bom reads
+one row of qty 2. nothing is flagged `grounded`, so fcad anchors the first
+instance and Fixed-joints the rest.
+
+the plate is sketch-driven: one outline feeds both `profile2d` and the solid,
+which is that outline faced and extruded rather than an independent box, so the
+defining sketch and the geometry cannot drift apart. the screw is turned, not
+extruded, so it has no `profile2d` and no defining sketch.
+
+the screw threads into a pilot hole rather than passing through a clearance hole,
+so its shank really does interpenetrate both plates: `embeds` is what keeps the
+interference check (and the FEM fuse) from calling that a collision. drop the
+flag and `check` fails on both plates. the screw also needs an explicit `length`,
+since the bom would otherwise take its bbox x-extent, which for a screw standing
+on Z is the head diameter. the pilot holes go in `fastener_holes` rather than
+`holes`, so they are drawn on the plate's sketch but left off the dimensioned
+drawing.
+
+all geometry is centered by construction rather than translated, so the
+assembly's placements cannot shift a part.
+"""
+
+import fcad, Part, FreeCAD as App
+
+# the screw's proportions, as multiples of its nominal diameter: a pan head, and
+# the pilot hole the plates are drilled to (under the shank, so it threads in).
+HEAD_DIA = 2.0
+HEAD_THK = 0.7
+PILOT = 0.7
+
+PARAMS = {"plate_len": 90.0, "plate_wid": 40.0, "plate_thk": 10.0,
+          "overlap": 40.0, "screw_dia": 6.0}
+
+
+def _outline(length, width):
+    """the closed rectangle footprint, centered on the origin."""
+    l, w = length / 2.0, width / 2.0
+    return [(-l, -w), (l, -w), (l, w), (-l, w)]
+
+
+def _plate(points, thickness, hole):
+    face = Part.Face(Part.makePolygon(
+        [App.Vector(x, y, -thickness / 2.0) for x, y in points + points[:1]]))
+    cx, cy, dia = hole
+    bore = Part.makeCylinder(dia / 2.0, thickness,
+                             App.Vector(cx, cy, -thickness / 2.0), App.Vector(0, 0, 1))
+    return face.extrude(App.Vector(0, 0, thickness)).cut(bore)
+
+
+def _screw(dia, grip):
+    """head above z = 0 with the shank hanging below, so the part's origin is the
+    face the head bears on and one placement seats it on the top plate."""
+    shank = Part.makeCylinder(dia / 2.0, grip,
+                              App.Vector(0, 0, -grip), App.Vector(0, 0, 1))
+    head = Part.makeCylinder(dia * HEAD_DIA / 2.0, dia * HEAD_THK,
+                             App.Vector(0, 0, 0), App.Vector(0, 0, 1))
+    return shank.fuse(head)
+
+
+def compute(p):
+    l, w, t = p["plate_len"], p["plate_wid"], p["plate_thk"]
+    ov, d = p["overlap"], p["screw_dia"]
+    off = (l - ov) / 2.0          # plate center to the center of the lap
+    grip = 2.0 * t                # the screw spans both plates
+    hole = (off, 0.0, d * PILOT)
+    points = _outline(l, w)
+    return [
+        fcad.Part("plate", profile="bar %gx%g" % (w, t),
+                  placements=[
+                      App.Placement(App.Vector(-off, 0, -t / 2.0), App.Rotation()),
+                      App.Placement(App.Vector(off, 0, t / 2.0),
+                                    App.Rotation(App.Vector(0, 0, 1), 180))],
+                  solid=lambda: _plate(points, t, hole),
+                  profile2d=(points, t),
+                  fastener_holes=[hole]),
+        fcad.Part("screw", profile="m%g screw" % d,
+                  placements=[App.Placement(App.Vector(0, 0, t), App.Rotation())],
+                  solid=lambda: _screw(d, grip),
+                  length=grip, embeds=True),
+    ]

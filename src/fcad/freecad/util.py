@@ -6,11 +6,16 @@ centralizes the headless gotchas we confirmed on FreeCAD 1.1.1:
   raises NameError headless).
 """
 
+import json
+import math
 import os
+import zipfile
 
 import FreeCAD as App
 import Part
 import Mesh
+
+from fcad.config import placements_path  # noqa: F401  (re-exported for callers)
 
 # our own A4 landscape template: a border plus a fillable title block. the
 # bundled default is blank (no border, no block), so we ship one as package data.
@@ -49,6 +54,118 @@ def export_stl(objs, path):
 def export_svg(objs, path):
     import importSVG
     importSVG.export(objs, path)
+
+
+# what a viewer should show: the solids of a part file, and the links plus the
+# container of an assembly. sketches, varsets, origins and joints stay hidden -
+# they are inputs and decoration, not the model.
+VISIBLE_TYPES = ("App::Link", "Assembly::AssemblyObject", "Part::Extrusion",
+                 "Part::Feature", "Part::FeaturePython")
+
+# freecad's isometric orientation (rotation axis then angle); it describes a
+# direction, so it is the same for every model whatever its size.
+ISO_ORIENTATION = "0.74290609 0.30772209 0.59447283  1.2171158"
+ISO_DIR = (1.0, -1.0, 1.0)  # the camera sits along this ray from the centre
+
+_GUI_DOC = """<?xml version='1.0' encoding='utf-8'?>
+<Document SchemaVersion="1">
+    <ViewProviderData Count="%d">
+%s    </ViewProviderData>
+%s</Document>
+"""
+_GUI_VIEWPROVIDER = """        <ViewProvider name="%s">
+            <Properties Count="1" TransientCount="0">
+                <Property name="Visibility" type="App::PropertyBool" status="1">
+                    <Bool value="%s"/>
+                </Property>
+            </Properties>
+        </ViewProvider>
+"""
+# coin serializes the camera as an inventor node in one attribute, newlines and
+# all; freecad writes it exactly this way.
+_GUI_CAMERA = (
+    '    <Camera settings="OrthographicCamera {&#10;'
+    '  viewportMapping ADJUST_CAMERA&#10;'
+    '  position %.6f %.6f %.6f&#10;'
+    '  orientation %s&#10;'
+    '  nearDistance %.6f&#10;'
+    '  farDistance %.6f&#10;'
+    '  aspectRatio 1&#10;'
+    '  focalDistance %.6f&#10;'
+    '  height %.6f&#10;&#10;}&#10;"/>\n')
+
+
+def _visible_bbox(doc):
+    """bounding box of everything a viewer will show, or None."""
+    bb = None
+    for o in doc.Objects:
+        if o.TypeId not in VISIBLE_TYPES:
+            continue
+        shape = getattr(o, "Shape", None)
+        if shape is None or shape.isNull():
+            continue
+        bb = shape.BoundBox if bb is None else bb.united(shape.BoundBox)
+    return bb
+
+
+def _camera(bb):
+    """an isometric fit-all orthographic camera for a bounding box.
+
+    matched against what the gui's own viewIsometric + ViewFit produces: the
+    ortho height is exactly the box's diagonal, the camera sits half a diagonal
+    from the centre along (1,-1,1), and focalDistance is that same half diagonal.
+    the diagonal is the largest extent the model can project to at any
+    orientation, so it fits whatever the view angle; near/far are opened a
+    further diagonal either way so nothing clips."""
+    d = bb.DiagonalLength if bb is not None else 0.0
+    if d <= 0:
+        return ""
+    off = d / (2.0 * math.sqrt(3.0))
+    c, focal = bb.Center, d / 2.0
+    return _GUI_CAMERA % (c.x + ISO_DIR[0] * off, c.y + ISO_DIR[1] * off,
+                          c.z + ISO_DIR[2] * off, ISO_ORIENTATION,
+                          focal - d, focal + d, focal, d)
+
+
+def export_gui_state(doc, path):
+    """bake view state into a saved .FCStd so it opens showing the fitted model.
+
+    visibility and camera are gui state and live in the zip's GuiDocument.xml,
+    which freecadcmd cannot write because it has no ViewObject - so a headless
+    build's artifact opens with every object switched off and the 3d view looks
+    empty (for an assembly the only things left on are the joints, which draw
+    nothing). the file is plain xml and freecad restores a partial one happily,
+    defaulting whatever we leave out, so the Visibility flags plus a camera are
+    enough and the build stays headless. call it right after saving, before
+    adding anything the saved file does not contain."""
+    entries = "".join(
+        _GUI_VIEWPROVIDER % (o.Name, "true" if o.TypeId in VISIBLE_TYPES else "false")
+        for o in doc.Objects)
+    xml = _GUI_DOC % (len(doc.Objects), entries, _camera(_visible_bbox(doc)))
+    with zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("GuiDocument.xml", xml)
+
+
+def export_placements(placements, path):
+    """write {part name: [Placement]} as json.
+
+    the 3d diff pairs instances across two revisions of a design, so it needs
+    both revisions' placements; it cannot get them by calling `compute` twice
+    because the two answers come from two different revisions of the project's
+    own code. the builder already knows them, so it records them beside the
+    other neutral exports and the diff reads both sides back."""
+    data = {name: [[[p.Base.x, p.Base.y, p.Base.z], list(p.Rotation.Q)] for p in pls]
+            for name, pls in placements.items()}
+    with open(path, "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+
+
+def read_placements(path):
+    with open(path) as f:
+        data = json.load(f)
+    return {name: [App.Placement(App.Vector(*base), App.Rotation(*quat))
+                   for base, quat in pls]
+            for name, pls in data.items()}
 
 
 def export_svg_edges(shape, path, direction=App.Vector(0, 0, 1)):

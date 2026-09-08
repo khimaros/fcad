@@ -56,6 +56,19 @@ the project/name/dist/binaries once, exports them into the environment, then:
   FreeCAD need).
 - **diff**: `diff.py` builds the git-HEAD geometry in a throwaway `git worktree`
   (a nested `freecadcmd ... build step`), then execs the gui against `diff_doc.py`.
+  the nested build must be repointed at the worktree's *own* copy of the design:
+  the cli has already exported `FCAD_ENTRY` as an absolute path into the working
+  tree, so overriding `FCAD_PROJECT` alone would have a `.fcad` project silently
+  diff itself. `freecadcmd` exits 0 even when the script raised, so `diff.py`
+  judges success by whether the artifact appeared, not by the return code.
+- **git-diff**: the external diff driver `install-git` registers, so `git diff` on
+  a `.fcad` file opens the 3d diff. it shares the compute step with `diff` but not
+  the worktree: git already hands it both revisions as files, which is both simpler
+  and more general (any revision pair, not just HEAD). a `.fcad` file is the whole
+  project, so each side builds in isolation from a copy of that one file, with
+  `dist/` landing beside it. it must exit 0 whatever happens - git treats any other
+  status as fatal - so failures are printed, which is where a diff driver's output
+  belongs anyway.
 - **fem**: a headless `freecadcmd` command driving the FEM workbench's gmsh mesher
   and CalculiX solver. it deliberately avoids `fea.run()` and every `*Gui`/VTK
   module (neither exists headless), calling the granular `write_inp_file` /
@@ -105,11 +118,27 @@ single file.
   catalog is a project global rather than an fcad table because "what lengths can
   i buy" is a fact about a supplier, which is exactly the kind of model knowledge
   the instrumentation must not hold.
-- the gui-only split (`export_pdf`, `diff_doc`, the view-readiers) exists because
-  TechDraw's pdf/svg export and Draft layer colors live in the `*Gui` modules,
-  which only exist in a gui session. `export_pdf` must wait for each view's
-  threaded HLR projection to land (`getVisibleEdges`) before exporting, or the
-  still-computing views drop out of the pdf at random.
+- `diff_doc` diffs **per part**, not per assembly. the kernel's boolean cost is
+  superlinear in the combined faces of its two arguments, so cutting a compound of
+  every changed solid against another compound of every changed solid does not
+  finish on a real assembly (interpenetrating fasteners make the intersection graph
+  dense). instead each part type is cut against its own previous version once, in
+  the part-local frame, and the green/red/grey results are placed at each instance:
+  the boolean count follows the number of changed part *types*, and instances that
+  merely appeared, vanished or moved need no boolean. that requires both revisions'
+  placements, which the diff cannot recompute (the old ones came from a revision of
+  the project's code that is gone), so every assembly build records them in
+  `dist/<name>-placements.json` and the diff reads both sides back. pairing by part
+  also stops parts contaminating each other, which the whole-assembly cut could not:
+  it subtracted every old solid from every new one regardless of provenance.
+- the gui-only split (`export_pdf`, the view-readiers) exists because TechDraw's
+  pdf/svg export and ViewObject colors live in the `*Gui` modules, which only
+  exist in a gui session. `export_pdf` must wait for each view's threaded HLR
+  projection to land (`getVisibleEdges`) before exporting, or the still-computing
+  views drop out of the pdf at random. the diff is split along that same line but
+  the other way round: `diff_doc` is purely headless (it bakes the three layers as
+  plain object groups and saves them) and `view_diff` is purely gui (it colors
+  those groups on open). neither carries a `GuiUp` branch for the other's job.
 - builds save fully baked, viewers open read-only. the Assembly workbench's
   Fixed joints reference the assembly container, so the joint graph is a non-DAG
   cycle a topological recompute can never settle, so the joints would stay

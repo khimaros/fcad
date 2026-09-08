@@ -74,17 +74,43 @@ entrypoints work around gotchas the gui session introduces:
   writes no GuiDocument, so components open hidden), so after fitting, `view.py`
   clears it with `Gui.getDocument(name).Modified = False`: the view state is
   display-only and the build owns the file, so closing must not prompt to save.
+- **diff-open:** a freecadcmd-built document opens with **every** object hidden,
+  and that includes the container objects, not just the geometry. `view_diff`
+  originally showed only the `Part::Feature`s, which drew the solids but left each
+  layer's own `App::DocumentObjectGroup` switched off: the tree read hidden while
+  the 3d view read visible, and clicking a layer appeared to do nothing until it
+  had been toggled twice. show every object that has a `ViewObject`. confirmed by
+  reading the tree items back under `xvfb-run freecad`: on a raw open all six
+  objects report `Visibility=False` and the tree greys them (`fg=116,116,116`);
+  after the fix all six are `True` and the rows draw normally.
 - `dconf-CRITICAL ... /run/user/1000/dconf` messages are sandbox env noise,
   unrelated to the model.
-- **view state:** freecadcmd writes no GuiDocument and has no `ViewObject`, so a
-  freecadcmd-built `.FCStd` opens in the gui with every object hidden (visibility
-  is gui-only state that the headless build cannot persist): a part looks empty,
-  holes and all. `view_parts.py` (`fcad view parts`) opens each part, shows the
-  solid / hides its sketch, frames it, and re-saves so the file carries a
-  GuiDocument; it does not exit, leaving the docs open for inspection. for the
-  save to make the file open straight to the model, the part `.FCStd` must
-  contain only the part: `build_one` saves it *before* the dxf/drawing/sketch
-  exports (which add TechDraw pages).
+- **view state:** visibility is gui state, held in the zip's `GuiDocument.xml`,
+  and freecadcmd has no `ViewObject` to produce one. so a freecadcmd-built
+  `.FCStd` used to open with every object switched off: a part looked empty, holes
+  and all, and an assembly showed nothing at all (its only visible objects were the
+  joints, which draw nothing without a view proxy). the build now writes that file
+  itself (`util.export_gui_state`). freecad restores a *partial* GuiDocument
+  happily, defaulting every property it does not find, so emitting just the
+  `Visibility` bool per object is enough - no need to synthesize the 15-property
+  ViewProvider blocks the gui writes, which would bake gui internals into the
+  builder. it is appended to the saved zip with plain `zipfile`, so the build stays
+  headless. call it directly after saving and before adding anything the saved file
+  does not contain: `build_one` saves the part *before* the dxf/drawing/sketch
+  exports (which add TechDraw pages), and bakes the view state at that same point.
+  `view_parts.py` / `view.py` still force visibility at open, which costs nothing
+  and keeps artifacts built by an older fcad working.
+- **baked camera:** the same GuiDocument carries a `<Camera>` (one coin
+  `OrthographicCamera` node serialized into a single attribute), so a file also
+  opens *framed* rather than needing a manual View Fit. the relationship to the
+  model was measured off the gui's own `viewIsometric` + `ViewFit`, on a single
+  part and on a 190-instance assembly, and is exact: ortho `height` is the visible
+  bounding box's **diagonal**, `focalDistance` is half of it, and `position` is the
+  box centre plus `diagonal/(2*sqrt(3))` along `(1,-1,1)`. the `orientation`
+  quaternion is a direction, so it is the same constant for every model. using the
+  diagonal (not the projected extent) means it fits at any view angle. do not trust
+  a camera captured from a `ViewFit` under a headless/offscreen window - the
+  viewport has no useful size there and you get the default unit camera back.
   gotcha: `App.Document.save()` writes the GuiDocument but does
   **not** clear the gui's own `Modified` flag, so the window still reads "unsaved
   changes" after a save; clear it with `Gui.getDocument(name).Modified = False`

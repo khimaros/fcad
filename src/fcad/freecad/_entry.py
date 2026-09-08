@@ -10,9 +10,6 @@ the right binary (headless vs gui) and exported the FCAD_* / DIFF_* env vars.
 import os
 import sys
 
-# commands handled in a gui session; everything else is a headless build target.
-GUI = {"view", "view-parts", "pdf", "diff-doc", "view-diff"}
-
 
 def _bootstrap():
     # .../fcad/freecad/_entry.py -> the directory that holds the fcad package

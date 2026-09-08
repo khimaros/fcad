@@ -11,6 +11,99 @@
 
 ## done
 
+- **built files open view-ready and framed.** opening an fcad-built assembly showed
+  nothing at all: visibility is gui state, held in the zip's `GuiDocument.xml`,
+  freecadcmd has no `ViewObject` to write one, and without it every object restores
+  switched off - on planter the only visible objects were the 190 joints, which
+  draw nothing. `fcad view` papered over it by forcing visibility at open, so a
+  plain double-click (or any other tool) still got an empty window. the build now
+  writes that file itself (`util.export_gui_state`): freecad restores a *partial*
+  GuiDocument happily, defaulting whatever is absent, so emitting one `Visibility`
+  bool per object plus a camera is enough - no need to synthesize the 15-property
+  ViewProvider blocks the gui writes, which would bake gui internals into the
+  builder. it is appended to the saved zip with plain `zipfile`, so R2.4 (no
+  display in a build) still holds. the camera makes it open *framed* too: its
+  relationship to the model was measured off the gui's own `viewIsometric` +
+  `ViewFit` and is exact - ortho height is the visible bbox diagonal, focal
+  distance half of it, eye at centre + `diagonal/(2*sqrt(3))` along `(1,-1,1)` -
+  and the baked result matches a real `ViewFit` to 0.000% on every field, on both a
+  single part and planter's 190-instance assembly. frozen as R2.5a; covered by
+  `tests/test_contract.py` (links/solids visible, sketches and origin hidden, and
+  the camera arithmetic checked against an independently unioned bounding box).
+- **`git diff` opens the 3d diff.** `fcad install-git` registers fcad as the local
+  repo's external diff driver for the built `.FCStd` documents
+  (`diff.fcad.command` in `.git/config`, `*.FCStd diff=fcad` in
+  `.git/info/attributes`), so `git diff`, `git diff HEAD~3`, `git diff a-branch` on
+  a committed artifact show the green/red/grey model instead of "Binary files
+  differ". the binary is the file worth replacing: the `.fcad` source is python and
+  diffs fine as text, and is deliberately left alone - `install-git` instead writes
+  a *tracked* `.gitattributes` marking it Python
+  (`linguist-language`/`gitlab-language`) so github and gitlab render a design as
+  source and count it in the language stats. which attribute goes in which file is
+  forced, not a preference: git will not run a command a tracked file names, so the
+  driver must be local config, while a forge only ever reads committed files, so
+  the language hint must be tracked. `.gitattributes` is the only working-tree file
+  touched. `fcad git-diff` is the driver git calls with the 7-parameter
+  external-diff contract; it shares the compute step with `fcad diff` but builds
+  nothing at all, since git hands it two already-built documents - which is both
+  simpler and more general, because it covers whatever revision pair git was asked
+  about rather than only HEAD (2.6s for a planter part, 2.1s for its assembly).
+  git diffs one file at a time and the two kinds of document record different
+  things, which falls out as useful granularity: a part document holds its own
+  solid so it diffs as geometry, while an assembly holds no geometry at all - only
+  links - so it diffs as placements, which is exactly what that file records (a
+  part's shape changing is a change to the part file, diffed separately). the
+  links are stored *relative* to the document, so each revision is staged with the
+  real file's sibling directories mirrored beside it as symlinks, or it would
+  silently resolve to nothing; only directories are mirrored, so a staged copy can
+  never be written through a link onto the real document. `/dev/null` (git's
+  stand-in for an absent side) contributes nothing, which the per-part diff already
+  reads as wholly added or removed with no special case. it always exits 0, because
+  git reports any other status as a fatal error. covered by `tests/test_git.py`,
+  which asserts the wiring, that installing twice changes nothing, that
+  `git check-attr` binds `*.FCStd` to the driver while `.fcad` keeps its text diff,
+  that a real `git diff` invokes it with 7 parameters, and the baked volumes for a
+  resized part, a changed instance count, and a created/deleted document.
+- **the diff's layers open with their visibility badge correct.** opening a diff
+  showed all three layers drawn but their tree rows switched off, so toggling one
+  did nothing until it had been clicked twice. a freecadcmd-built document opens
+  with *every* object hidden, container objects included, and `view_diff` was
+  showing only the `Part::Feature`s - leaving each layer's own group off while its
+  contents were on. it now shows every object that has a `ViewObject`. verified by
+  reading the tree items back under `xvfb-run freecad`: on a raw open all six
+  objects report `Visibility=False` and the tree greys them; after, all six are
+  `True`, the rows draw normally, and the document is still not marked modified.
+  frozen as R4.7 and written up in CONTRIBUTING's gui-only notes.
+- **per-part 3d diff.** `fcad diff` used to diff the assembly as one pile of
+  solids: signature-matched instances were skipped, but everything left over went
+  into two compounds cut against each other in three whole-assembly booleans. on
+  ../planter's real HEAD diff (190 vs 184 solids, 80 vs 74 residual) the first of
+  those three did not finish in 25 minutes. now each *part type* is diffed against
+  its own previous version once, in the part-local frame, and the green/red/grey
+  results are placed at every instance - a transform, not a boolean. so the kernel
+  work follows the number of changed part types (11 types on planter, 3 changed)
+  instead of the instance count, and instances that merely appeared, vanished or
+  moved cost nothing: `fcad diff-build` on planter is ~11s end to end, most of it
+  rebuilding the HEAD geometry, and material is conserved to 0.5 mm^3 in 228
+  million. pairing by part also fixed a correctness bug the old cut had by
+  construction: it subtracted every old solid from every new one regardless of
+  provenance, so a screw that moved carved a spurious void out of a board that
+  grew. this changes what the layers mean - they now answer "what changed about
+  each part" rather than "what matter is here now", so material replaced by a
+  *different* part reads as red and green in the same place. instances pair by
+  placement (identical first, then nearest translation, then surplus/shortfall),
+  which needs both revisions' placements; the diff cannot recompute the old ones,
+  so every assembly build now records `dist/<name>-placements.json` (R2.1) and the
+  diff reads only that plus `parts/*.step` - it no longer loads the assembly STEP
+  at all. two pre-existing bugs surfaced and were fixed on the way: the nested
+  HEAD build inherited `FCAD_ENTRY` pointing into the working tree, so `fcad diff`
+  on a single-file `.fcad` project silently diffed the working tree against itself
+  (and wrote the "HEAD" build over the working `dist/`); and `freecadcmd` exits 0
+  even when the script raised, so a failed diff reported success, which
+  `diff.build` now catches by checking for the artifact. covered by
+  `tests/test_diff.py`: the fan-out, the cross-talk case, instance surplus, whole
+  parts added and removed, a single-part target, and a time budget on the
+  configuration that used to melt down (17s -> 0.1s).
 - **cut-list optimization.** the bom said how many pieces of what length but not
   what to buy. `fcad build cutlist` now packs each profile's bom rows into the
   stock lengths purchasable for it and writes `dist/<name>-cutlist.csv` (per cut
