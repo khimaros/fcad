@@ -10,6 +10,7 @@ resolved once from flags + environment and shared with the children.
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 
 from fcad import __version__, config, cutlist
@@ -18,6 +19,14 @@ from fcad._run import run_entry
 # headless build/validate commands handled by freecad/_entry's dispatch path.
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
                  "drawings", "sketches", "bom", "cutlist"]
+
+# the agent skill fcad ships, installed into a claude skills directory.
+SKILL_NAME = "freecad-python"
+SKILL_DIR = os.path.expanduser("~/.claude/skills")
+# records which freecad the installed `api/` describes. the reference is only
+# valid for the build that produced it, and `freecadcmd --version` is a 50ms
+# answer to "has that changed", so a reinstall costs nothing when it has not.
+SKILL_STAMP = "BUILD"
 
 
 def _build_parser():
@@ -71,7 +80,8 @@ def _build_parser():
     a.add_argument("stem", nargs="?")
 
     f = sub.add_parser("fem", help="solve FEM (von Mises + displacement; headless)")
-    f.add_argument("target", nargs="?", default="assembly")
+    f.add_argument("target", nargs="?", default="assembly",
+                   help="part name, 'assembly', or 'all' for every declared case")
     f.add_argument("--modal", action="store_true", help="also compute eigenmodes")
     f.add_argument("--modes", type=int, metavar="K",
                    help="eigenmode count (implies --modal)")
@@ -90,6 +100,10 @@ def _build_parser():
         d.add_argument("target", nargs="?", default="assembly")
 
     sub.add_parser("pdf", help="dimensioned techdraw pdfs (gui)")
+    ad = sub.add_parser("api-docs",
+                        help="freecad api reference for the installed build")
+    ad.add_argument("out", nargs="?", metavar="DIR",
+                    help="output dir (default <dist>/api)")
     sub.add_parser("clean", help="remove dist/")
     sub.add_parser("info", help="print the resolved configuration")
     m = sub.add_parser("install-macro", help="install the rebuild macro into FreeCAD")
@@ -97,6 +111,12 @@ def _build_parser():
                    help="macro directory (default ~/.local/share/FreeCAD/Macro)")
     sub.add_parser("install-git",
                    help="make `git diff` on a .fcad file open the 3d diff")
+    sk = sub.add_parser("install-skill",
+                        help="install/refresh the freecad-python agent skill")
+    sk.add_argument("--dir", metavar="DIR", dest="skill_dir",
+                    help="skills directory (default " + SKILL_DIR + ")")
+    sk.add_argument("--force", action="store_true",
+                    help="regenerate even when the freecad build is unchanged")
     g = sub.add_parser("git-diff",
                        help="git's external diff driver (git calls this itself; "
                             "register it with install-git)")
@@ -140,6 +160,77 @@ def _install_macro(macro_dir=None):
     with open(out, "w") as f:
         f.write(text)
     print("installed macro: " + out)
+
+
+def _freecad_build(cfg):
+    """the `freecadcmd --version` line, or "" if it cannot be asked."""
+    try:
+        r = subprocess.run([cfg.freecad, "--version"], capture_output=True,
+                           text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (r.stdout or r.stderr).strip()
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _install_wiki(source, dest):
+    """copy the curated wiki subset in, file by file.
+
+    deliberately not a tree replace: someone may have cloned the full 2630-page
+    export into this directory, and those extra pages are theirs to keep. we
+    overwrite only the names we ship and never delete."""
+    if not os.path.isdir(source):
+        return 0
+    os.makedirs(dest, exist_ok=True)
+    pages = sorted(f for f in os.listdir(source) if f.endswith(".md"))
+    for page in pages:
+        shutil.copyfile(os.path.join(source, page), os.path.join(dest, page))
+    return len(pages)
+
+
+def _install_skill(cfg, skill_dir=None, force=False):
+    """install (or refresh) the bundled agent skill: prose, wiki, api reference.
+
+    the skill is shipped by fcad rather than hand-maintained because its api
+    reference has to come from the freecad actually installed, which only the
+    machine running it knows. re-running is the update path: the reference is
+    pinned to a build, so it is regenerated when that build changes and skipped
+    when it has not."""
+    import fcad
+    pkg = os.path.dirname(os.path.abspath(fcad.__file__))
+    skill = os.path.join(pkg, "resources", "skills", SKILL_NAME)
+    source = os.path.join(skill, "SKILL.md")
+    out = os.path.join(skill_dir or SKILL_DIR, SKILL_NAME)
+    api = os.path.join(out, "api")
+    stamp = os.path.join(api, SKILL_STAMP)
+
+    build = _freecad_build(cfg)
+    wanted = _read(source)
+    current = (build and (_read(stamp) or "").strip() == build
+               and _read(os.path.join(out, "SKILL.md")) == wanted)
+    if current and not force:
+        print("install-skill: already current for %s -> %s" % (build, out))
+        return 0
+
+    os.makedirs(api, exist_ok=True)
+    with open(os.path.join(out, "SKILL.md"), "w") as f:
+        f.write(wanted)
+    pages = _install_wiki(os.path.join(skill, "wiki"), os.path.join(out, "wiki"))
+    rc = run_entry(cfg, ["api-docs"], env_extra={"FCAD_API_OUT": api})
+    if rc:
+        return rc
+    if build:
+        with open(stamp, "w") as f:
+            f.write(build + "\n")
+    print("installed skill: %s (%d wiki pages)" % (out, pages))
+    return 0
 
 
 def _cutlist_env(args):
@@ -217,6 +308,11 @@ def main(argv=None):
     if cmd == "install-macro":
         _install_macro(args.macro_dir)
         return 0
+    if cmd == "install-skill":
+        return _install_skill(cfg, args.skill_dir, args.force)
+    if cmd == "api-docs":
+        out = os.path.abspath(args.out or os.path.join(cfg.dist, "api"))
+        return run_entry(cfg, ["api-docs"], env_extra={"FCAD_API_OUT": out})
     return 2
 
 

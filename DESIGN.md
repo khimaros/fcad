@@ -31,11 +31,15 @@ src/fcad/
     dispatch.py   build/validate targets -> part/assembly builders
     build_parts.py  build_assembly.py  util.py
     view.py  view_parts.py  export_pdf.py  diff_doc.py
+    api_docs.py   introspect the installed FreeCAD -> a markdown api reference
     fem.py        headless mesh (gmsh) + solve (CalculiX) -> numpy result bundle
   render/         plain-python, numpy/matplotlib (the [render] extra)
     render.py  animate.py  fem_render.py  fem_animate.py
   resources/macros/rebuild.FCMacro
   resources/templates/fcad_A4_landscape.svg
+  resources/skills/freecad-python/    installed by `install-skill`:
+    SKILL.md                          the prose
+    wiki/                             52 curated wiki pages (CC0) + NOTICE.md
 ```
 
 ## how the cli reaches FreeCAD
@@ -79,6 +83,59 @@ the project/name/dist/binaries once, exports them into the environment, then:
   one step earlier. face selection resolves geometry predicates to live face refs
   in this same process, so a fragile "FaceN" index never crosses a process or
   geometry boundary (`fem_select` stays pure stdlib and importable everywhere).
+  two of its settings are corrections to FreeCAD defaults that are silently wrong
+  for fcad's purpose rather than merely coarse. the mesh is **2nd order but
+  straight-edged**: linear tets are over-stiff in bending (~20% low), while the
+  curved quadratic tets gmsh produces by default invert around small features and
+  CalculiX refuses them outright, so pinning midside nodes to edge midpoints buys
+  the quadratic displacement field without the inverted elements. and a force's
+  **direction is re-asserted immediately before each solve**, because a
+  ConstraintForce recomputes `DirectionVector` from its referenced face's normal
+  whenever it executes - a load set up once and then recomputed points somewhere
+  else entirely, and solves happily. the same shape shows up in the *output*: the
+  reported peak von Mises sits on a singularity - a clamped face, the sharp
+  internal corner of a drilled hole - where linear elasticity has no finite answer
+  and the value is a function of the mesh, not the part, so the bundle carries
+  `von_mises_p95`/`p99` next to it. all three defects share a shape worth
+  remembering: a plausible, confidently-reported, wrong number. that is why the
+  FEM tests assert against closed-form beam theory instead of a previous run.
+
+- **api-docs**: the one headless command that loads no project, because it
+  documents the *toolchain* rather than a model. it runs under `freecadcmd`
+  precisely so the reference describes the same binary every build uses. the
+  design constraint is that it may not know anything: a name is either read off a
+  live object or absent, never transcribed, which is what keeps it from drifting
+  the way prose documentation does. two consequences shape the module. it must
+  preload the workbench modules, since FreeCAD registers a module's TypeIds only
+  once imported and `supportedTypes()` otherwise reports `App` plus `Image` while
+  looking perfectly healthy - a silent near-empty result, so the test asserts
+  coverage rather than exit status. and it documents by *signature* what it
+  cannot instantiate: factories taking a parent object (an elmer equation wants
+  its solver, a mesh region its mesh) cannot be called blind, and their signature
+  is the answer a caller actually needs anyway.
+- **install-skill** is why `api-docs` is a command rather than a script kept
+  beside the skill. an agent skill about scripting FreeCAD is half prose, which
+  can be committed, and half a reference to a specific FreeCAD, which cannot -
+  it only exists once the skill meets a machine. so fcad ships the prose as
+  package data and generates the other half on install, which also makes the
+  update path the same command. staleness is keyed on `freecadcmd --version`
+  (50ms) rather than on regenerating and diffing, so the common no-op is two
+  orders of magnitude cheaper than the work it skips. it overwrites only what it
+  ships and never deletes, so a fuller wiki mirror or a user's notes in the same
+  directory survive an install - which is why the wiki goes in file by file
+  rather than as a tree replace.
+  the skill carries **both** a generated reference and 52 curated wiki pages
+  because they answer different questions and neither substitutes: `api/` says a
+  property exists, its type and its permitted values; the wiki says what it means
+  and how it is normally used. measured on eight real api questions from fcad's
+  own development, the *full* 2630-page wiki missed five outright - it documents
+  the gui, so the property behind a checkbox is frequently unnamed anywhere in
+  it. the reverse gap is just as sharp: no amount of introspection yields the
+  FeaturePython lifecycle or how a Sketcher constraint is constructed. the subset
+  is chosen rather than complete because 599 of those pages are sub-600-byte
+  stubs and 926 are gui references with no python at all; ~2% of the files carry
+  the scripting value, which is the difference between 650 KB of package data
+  and 22 MB of it.
 
 the project is loaded by `loader.py` from `FCAD_PROJECT` (the file to exec is
 carried separately in `FCAD_ENTRY` when it is a `.fcad`). a project is either a

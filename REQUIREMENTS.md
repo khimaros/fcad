@@ -71,7 +71,10 @@ never regress on them.
 - R3.1 `check` fails (non-zero exit) if any structural solids interpenetrate
   (parts flagged `embeds`, e.g. screws, are excluded), if any assembly component
   is neither grounded nor jointed, or if any defining sketch is not fully
-  constrained.
+  constrained. a failure states its reason - the overlapping pairs and their
+  volumes, the unconstrained components, the loose sketches - and that report
+  reaches stdout whether it is a terminal, a pipe, a file or CI. an exit status
+  with no reason is a failure of this requirement.
 - R3.2 `precommit` builds everything, then runs `check`.
 
 ## R4 - inspect
@@ -130,6 +133,27 @@ never regress on them.
   installs with `uv tool install` and exposes the `fcad` command.
 - R5.3 `clean` removes `dist/`. `info` prints the resolved configuration.
   `install-macro` installs the rebuild macro into FreeCAD's macro directory.
+- R5.5 `api-docs [DIR]` writes a FreeCAD api reference for the *installed* build
+  (default `<dist>/api`): the TypeIds `addObject` accepts, each workbench's
+  factory functions with their call signatures, and property tables giving each
+  property's name, type, default and enum values. every name is read off a real
+  object by introspection, never transcribed, so the reference cannot disagree
+  with the FreeCAD that produced it. it documents the toolchain rather than a
+  model, so it loads no project and runs headless. it must cover the workbenches,
+  not just `App`: FreeCAD only registers a module's types once that module is
+  imported, so an index naming a couple of hundred types is the requirement and a
+  few dozen means the reference is silently near-empty.
+- R5.6 `install-skill [--dir DIR] [--force]` installs the agent skill fcad ships
+  (default `~/.claude/skills/freecad-python`): its `SKILL.md` verbatim, a curated
+  subset of the FreeCAD wiki (CC0) covering the scripting semantics introspection
+  cannot supply, and an `api/` reference (R5.5) generated for the FreeCAD
+  installed on that machine - the last of which is why the skill cannot simply be
+  committed complete. re-running it is the update path: it records which build
+  the reference describes and regenerates when that build, or the shipped
+  `SKILL.md`, has changed, reporting a no-op otherwise; `--force` regenerates
+  regardless. it overwrites only what it ships - `SKILL.md`, `api/`, and the wiki
+  pages by name - and never deletes, so a fuller wiki mirror or local notes in
+  the same directory survive an install.
 - R5.4 the freecad binaries are overridable via `--freecad`/`--freecad-gui` or the
   `FREECAD`/`FREECAD_GUI` env vars.
 
@@ -141,9 +165,15 @@ never regress on them.
   surface plus per-node von Mises stress and displacement. it runs with no display
   and without VTK. `TARGET` is `assembly` (default) or a part name; the assembly is
   the structural solids fused into one bonded body (parts flagged `embeds` excluded).
+  the mesh is second-order: 1st-order tets are over-stiff in bending and understate
+  deflection and stress by ~20% at usable mesh sizes, which is a wrong answer rather
+  than a coarse one.
 - R6.2 a project may declare per-target FEM inputs (material, fixed faces, loads,
   self-weight, mesh size, modes) via an optional `Project.fem` descriptor; faces are
-  selected by geometry predicate, never by fragile face indices. material is a named
+  selected by geometry predicate, never by fragile face indices. a force load acts
+  along the direction the project declared, which reaches the solver rather than
+  being replaced en route by the loaded face's normal; a pressure load acts along
+  that normal by definition (`reversed` flips it). material is a named
   FreeCAD library card, an fcad built-in alias (`steel`/`aluminum`/`wood`/...), a
   name registered in the project's own `materials`, or an explicit `{E,nu,rho}`
   dict; a case with no material takes the project-wide `material` default. absent a

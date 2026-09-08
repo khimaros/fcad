@@ -19,8 +19,8 @@ render = ["numpy", "numpy-stl", "matplotlib"]
 fcad = "fcad.cli:main"
 
 [tool.hatch.build.targets.wheel]
+# hatchling ships every file under the package dir, so `resources/` (the rebuild
+# macro, the drawing template, the agent skill that install-macro/install-skill
+# read back) needs no force-include - adding one made the wheel build fail
+# outright on a duplicate archive entry.
 packages = ["src/fcad"]
-
-# ship the gui rebuild macro as package data (install-macro reads it from here).
-[tool.hatch.build.targets.wheel.force-include]
-"src/fcad/resources" = "fcad/resources"

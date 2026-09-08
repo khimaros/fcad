@@ -4,8 +4,9 @@ runs under `freecadcmd`. drives the FEM workbench's gmsh mesher + CalculiX solve
 through the granular tool calls (write_inp/ccx_run/load_results), never
 `fea.run()`, which pulls in the gui and VTK (neither is available headless). the
 analysis inputs come from the project's optional `fem` descriptor (material, fixed
-faces, loads, self-weight, mesh size, modes); absent that, a convention fallback
-(fix the min-Z faces, self-weight, steel) so any project still yields a result.
+faces, partial supports, loads, self-weight, gravity direction, mesh size, modes);
+absent that, a convention fallback (fix the min-Z faces, self-weight, steel) so any
+project still yields a result. target "all" solves every case the project declares.
 
 the result is written two ways: `<target>.fem.FCStd` (the analysis document) and
 `<target>.fem.npz`, a FreeCAD/VTK-free numpy bundle (boundary surface + per-node
@@ -37,6 +38,21 @@ MATERIALS = {"steel": "CalculiX-Steel", "aluminum": "Aluminum-6061-T6",
              "hardwood": {"E": 13000.0, "nu": 0.40, "rho": 700.0}}
 DEFAULT_MODES = 6          # modal count when --modal is given without a number
 GRAVITY = "9.81 m/s^2"
+# 2nd-order (10-node) tets. FreeCAD defaults its gmsh mesher to 1st order, and
+# 4-node tets are badly over-stiff in bending: a cantilever reads ~21% under its
+# closed form at the mesh sizes fcad picks, converging from below only as the mesh
+# is refined. quadratic elements land within ~0.5% using a quarter the elements,
+# and CalculiX solves C3D10 natively, so the accuracy is nearly free.
+#
+# straight-edged, though (SECOND_ORDER_LINEAR): by default gmsh curves each midside
+# node onto the real surface, and around small curved features - a drainage hole in
+# a thin slat - that inverts elements, which CalculiX rejects outright as
+# "nonpositive jacobian". pinning midside nodes to the edge midpoints keeps the
+# element affine, so its jacobian is constant and positive wherever the linear tet
+# was valid. only the *geometry* becomes faceted; the displacement field stays
+# quadratic, which is where the bending accuracy actually comes from.
+ELEMENT_ORDER = "2nd"
+SECOND_ORDER_LINEAR = True
 
 
 def _get(case, attr, default=None):
@@ -117,22 +133,55 @@ def _material(doc, analysis, case, project=None):
 
 
 def _constraints(doc, analysis, case, obj, infos):
-    """add the fixed, load and self-weight constraints described by the case."""
-    for sel in _get(case, "fixed", [fs.min_along("z")]):
+    """add the fixed/support, load and self-weight constraints described by the
+    case.
+
+    returns the [(force constraint, direction)] pairs `_run` must re-assert."""
+    supports = _get(case, "supports", []) or []
+    for sel in _get(case, "fixed", [] if supports else [fs.min_along("z")]):
         c = ObjectsFem.makeConstraintFixed(doc, "Fixed")
         c.References = _refs(sel, infos, obj)
         analysis.addObject(c)
+    for sup in supports:
+        _support(doc, analysis, sup, obj, infos)
     loads = _get(case, "loads", []) or []
+    directions = []
     for load in loads:
-        analysis.addObject(_load(doc, load, obj, infos))
+        c, vec = _load(doc, load, obj, infos)
+        analysis.addObject(c)
+        if vec is not None:
+            directions.append((c, vec))
     if _get(case, "self_weight", not loads):
         g = ObjectsFem.makeConstraintSelfWeight(doc, "Gravity")
         g.GravityDirection = App.Vector(*_get(case, "gravity", (0, 0, -1)))
         g.GravityAcceleration = GRAVITY
         analysis.addObject(g)
+    return directions
+
+
+def _support(doc, analysis, sup, obj, infos):
+    """restrain only the named translation axes of a face (`fix="yz"`).
+
+    a fully fixed face is a clamp: every node on it is pinned, so the face cannot
+    rotate and a beam held at both end faces reads far stiffer than one merely
+    resting on its bearings. leaving an axis free lets the end face rotate into
+    the span, which is what a bearing actually allows. face selectors cannot
+    isolate an edge, so a true simple support is still out of reach; clamp one
+    end and roller the other and a uniformly loaded beam at least carries the
+    right peak moment."""
+    c = ObjectsFem.makeConstraintDisplacement(doc, "Support")
+    c.References = _refs(_get(sup, "faces"), infos, obj)
+    fix = str(_get(sup, "fix", "xyz")).lower()
+    for axis in "xyz":
+        if axis in fix:
+            setattr(c, axis + "Free", False)
+            setattr(c, axis + "Displacement", 0.0)
+    analysis.addObject(c)
 
 
 def _load(doc, load, obj, infos):
+    """(constraint, direction to re-assert later) for one declared load; a
+    pressure acts along its face's normal by definition, so it has no direction."""
     refs = _refs(_get(load, "faces"), infos, obj)
     mag = float(_get(load, "magnitude", 0.0))
     if _get(load, "kind", "force") == "pressure":
@@ -141,16 +190,29 @@ def _load(doc, load, obj, infos):
         # FreeCAD's internal pressure unit is mN/mm^2; pass MPa explicitly.
         c.Pressure = "%g MPa" % mag
         c.Reversed = bool(_get(load, "reversed", False))
-        return c
+        return c, None
     c = ObjectsFem.makeConstraintForce(doc, "Force")
     c.References = refs
     # FreeCAD's internal force unit is mN; pass newtons explicitly.
     c.Force = "%g N" % mag
     direction = _get(load, "direction", "-z")
     vec = fs._axis_vec(direction) if isinstance(direction, str) else tuple(direction)
-    c.DirectionVector = App.Vector(*vec)
     c.Reversed = False
-    return c
+    return c, App.Vector(*vec)
+
+
+def _reassert_directions(directions):
+    """write each declared force direction back onto its constraint.
+
+    a ConstraintForce re-derives DirectionVector from its referenced face's
+    outward normal whenever it executes - merely adding it to the analysis does
+    it, and every later recompute does it again - so a direction set when the
+    constraint is built is gone long before the solver reads it, and the solve
+    then succeeds with the load pointing along the face normal. re-asserting here,
+    with nothing left to recompute in between, is what actually reaches the
+    CalculiX *CLOAD block."""
+    for c, vec in directions:
+        c.DirectionVector = vec
 
 
 def _mesh_size(case, shape):
@@ -214,7 +276,25 @@ def _result_objs(analysis):
     return [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
 
 
-def _run(analysis, solver, target):
+def _no_result(target, solver, mesh):
+    """CalculiX wrote nothing usable. the two causes pull `mesh_size` in opposite
+    directions, so the message names both rather than guessing: too fine and the
+    solve exhausts memory and dies mid-step (a 2nd-order mesh carries several
+    times the nodes the same mesh_size gave when elements were linear, which is
+    what bites a project whose mesh_size was tuned against the old default), too
+    coarse or too notched and gmsh emits degenerate elements ccx rejects outright
+    as "nonpositive jacobian"."""
+    return ("fcad fem: CalculiX produced no result for %r (%s analysis, %d nodes "
+            "at mesh_size %g). raise mesh_size if the solve ran out of memory - "
+            "2nd-order elements need far fewer of them for the same accuracy - or "
+            "lower it, or simplify the part's small features, if the mesh has "
+            "degenerate elements."
+            % (target, solver.AnalysisType, mesh.FemMesh.NodeCount,
+               float(mesh.CharacteristicLengthMax)))
+
+
+def _run(analysis, solver, target, mesh, directions=()):
+    _reassert_directions(directions)
     fea = ccxtools.FemToolsCcx(analysis, solver)
     fea.purge_results()
     fea.update_objects()
@@ -224,12 +304,7 @@ def _run(analysis, solver, target):
     fea.load_results()
     results = [r for r in _result_objs(analysis) if r.Mesh is not None]
     if not results:
-        # CalculiX wrote no usable result, almost always degenerate mesh elements
-        # ("nonpositive jacobian"), common on heavily-notched/thin solids.
-        raise SystemExit(
-            "fcad fem: CalculiX produced no result for %r (%s analysis). the mesh "
-            "likely has degenerate elements; try a smaller mesh_size or simplify the "
-            "part's small features." % (target, solver.AnalysisType))
+        raise SystemExit(_no_result(target, solver, mesh))
     return results
 
 
@@ -250,28 +325,37 @@ def solve(project, values, target, dist):
     solver = ObjectsFem.makeSolverCalculiXCcxTools(doc, "Solver")
     analysis.addObject(solver)
     _material(doc, analysis, case, project)
-    _constraints(doc, analysis, case, obj, infos)
+    directions = _constraints(doc, analysis, case, obj, infos)
     mesh = ObjectsFem.makeMeshGmsh(doc, "FEMMesh")
     mesh.Shape = obj
     mesh.CharacteristicLengthMax = _mesh_size(case, shape)
+    mesh.ElementOrder = ELEMENT_ORDER
+    mesh.SecondOrderLinear = SECOND_ORDER_LINEAR
     analysis.addObject(mesh)
     doc.recompute()
     gmshtools.GmshTools(mesh).create_mesh()
 
     out = {"target": target, "units": "mm/MPa", "n_modes": 0}
     solver.AnalysisType = "static"
-    static = _run(analysis, solver, target)[0]
+    static = _run(analysis, solver, target, mesh, directions)[0]
     coords, tris, node_ids = _boundary(static.Mesh.FemMesh)
     disp = _disp(static, node_ids)
-    out.update(nodes=coords, tris=tris,
-               von_mises=np.array(_field(static, node_ids, "vonMises"), np.float32),
+    vm = np.array(_field(static, node_ids, "vonMises"), np.float32)
+    # the nodal maximum lands on whatever singularity the model contains - a
+    # clamped face, the sharp internal corner of a drilled hole - where linear
+    # elasticity has no finite answer and the value simply grows as the mesh is
+    # refined. the high percentiles are the part of the field a reader can size
+    # against, so they travel with the result rather than being recovered later.
+    out.update(nodes=coords, tris=tris, von_mises=vm,
+               von_mises_p95=np.float32(np.percentile(vm, 95)),
+               von_mises_p99=np.float32(np.percentile(vm, 99)),
                disp=disp, disp_mag=np.linalg.norm(disp, axis=1).astype(np.float32),
                bbox_diag=np.float32(shape.BoundBox.DiagonalLength))
 
     if modes > 0:
         solver.AnalysisType = "frequency"
         solver.EigenmodesCount = modes
-        results = sorted(_run(analysis, solver, target),
+        results = sorted(_run(analysis, solver, target, mesh, directions),
                          key=lambda r: r.EigenmodeFrequency)
         out["n_modes"] = len(results)
         out["mode_freqs"] = np.array([r.EigenmodeFrequency for r in results], np.float32)
@@ -282,13 +366,26 @@ def solve(project, values, target, dist):
     return out
 
 
+def _targets(project, target):
+    """the targets to solve; "all" means every case the project declares."""
+    if target != "all":
+        return [target]
+    if not isinstance(project.fem, dict):
+        raise SystemExit("fcad fem all: this project declares no fem cases to "
+                         "enumerate (its FEM is not a mapping)")
+    return [k for k in project.fem if not k.startswith("__")]
+
+
 def main(target="assembly"):
     project = load_project()
     values = project.defaults()
     dist = project.dist
     dispatch.dirs(project)            # ensure dist/ exists
-    out = solve(project, values, target, dist)
-    np.savez_compressed(os.path.join(dist, target + ".fem.npz"), **out)
-    print("fem ok: target=%s nodes=%d modes=%d -> %s" %
-          (target, len(out["nodes"]), out["n_modes"],
-           os.path.join(dist, target + ".fem.npz")))
+    for name in _targets(project, target):
+        out = solve(project, values, name, dist)
+        path = os.path.join(dist, name + ".fem.npz")
+        np.savez_compressed(path, **out)
+        print("fem ok: target=%s nodes=%d modes=%d vm_p95=%.2f MPa "
+              "vm_max=%.1f MPa disp=%.3f mm -> %s" %
+              (name, len(out["nodes"]), out["n_modes"], out["von_mises_p95"],
+               out["von_mises"].max(), out["disp_mag"].max(), path))

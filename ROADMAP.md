@@ -11,6 +11,102 @@
 
 ## done
 
+- **partial supports, so a beam is not clamped at both ends.** a case may now
+  declare `supports=[dict(faces=[...], fix="yz"), ...]` beside `fixed`,
+  restraining only the named translation axes via `makeConstraintDisplacement`.
+  a fully fixed face is a clamp -- every node on it is pinned, so it cannot
+  rotate -- and clamping both ends of a member reads ~5x stiff against a beam
+  that merely rests on its bearings, understating its peak moment by a third.
+  face selectors still cannot isolate an edge, so a true simple support is out
+  of reach; clamp one end and roller the other and a uniformly loaded beam at
+  least carries the right `wL^2/8`. (the property names came straight out of
+  `api-docs`, which is the reason it exists: `xFree`/`yFree`/`zFree` appear
+  nowhere in the wiki.)
+- **`fem all`, and percentiles beside the peak.** `fcad fem all` works through
+  every case a project declares rather than one target per invocation. the npz
+  gained `von_mises_p95`/`p99`: the nodal maximum always lands on a singularity
+  -- a clamped face, the sharp internal corner of a notch or a drilled hole --
+  where linear elasticity has no finite answer, so it reports the mesh rather
+  than the part. a notched planter floor board reads 110.6 MPa at its worst node
+  and 6.31 at p95; a mesh reseed swung one runner's maximum from 1015 to 10.9
+  between two runs while its p95 moved from 7.7 to 4.0.
+- **`api-docs`: a build-accurate FreeCAD api reference.** `fcad api-docs [DIR]`
+  writes `index/typeids/factories/fem/properties.md` for the *installed* build by
+  instantiating real objects and reading `PropertiesList` /
+  `getTypeIdOfProperty` / `getEnumerationsOfProperty` off them, so no name in it
+  is transcribed and it cannot drift from the FreeCAD that made it. on 1.1.1:
+  337 TypeIds over 14 modules, 77 `ObjectsFem` makers, 26 property tables.
+  it exists because the two alternatives both fail quietly - the wiki documents
+  the *gui* and often never names the property behind a checkbox (`xFree` /
+  `yFree` / `zFree` on a displacement constraint appear nowhere in 2600 pages of
+  it), and recalled api knowledge goes stale as names move between versions
+  (`Support` -> `AttachmentSupport`). it documents the toolchain, not a model, so
+  it loads no project. the sharp edge is `supportedTypes()` reporting only
+  *loaded* modules: without preloading the workbenches the index comes out as
+  `App` plus `Image`, 38 types, with the same exit status and file count as a
+  good run - so `tests/test_api_docs.py` asserts the coverage (>= 200 types, six
+  named workbench TypeIds) and not just that files appeared. factories that need
+  a parent object (elmer equations, mesh regions) are documented by call
+  signature rather than reported as errors. frozen as R5.5.
+- **`install-skill`: ship the reference as an agent skill.** `fcad install-skill`
+  installs `resources/skills/freecad-python/SKILL.md` into
+  `~/.claude/skills/freecad-python` and generates `api/` beside it for the local
+  FreeCAD. the skill is shipped by fcad rather than committed complete anywhere
+  because half of it - the api reference - only exists once it meets the machine
+  it runs on. re-running is the update path: the reference is pinned to a build
+  (`api/BUILD`, from a 50ms `freecadcmd --version`), so an unchanged build is a
+  130ms no-op that says so, a changed build or an updated shipped `SKILL.md`
+  regenerates, and `--force` always does. it owns `SKILL.md` and `api/` and
+  leaves the rest of the directory alone. it also ships **52 curated wiki pages**
+  (~650 KB, CC0), which is the other half of the answer: `api/` states that a
+  property exists and what it accepts, the wiki explains what it *means*, and
+  nothing generated can replace the FeaturePython lifecycle, attachment
+  semantics, topological traversal or constraint construction. the subset is the
+  point - the full export is 2630 pages and 22 MB, of which 599 are sub-600-byte
+  stubs and 926 are gui pages with no python at all, so 2% of the files carry
+  essentially all the scripting value. measured against eight real api questions
+  from fcad's own development the full wiki missed five outright (`ElementOrder`,
+  `SecondOrderLinear`, `DirectionVector`, `CharacteristicLengthMax`, and `xFree`
+  outside a 0.19 release note), which is what settled the division of labour.
+  frozen as R5.6; covered by `tests/test_api_docs.py`, including that an install
+  composes with a fuller mirror rather than replacing it.
+
+- **FEM: two silently wrong answers.** both produced plausible numbers that
+  CalculiX reported success on, which is why no self-consistency assertion ever
+  saw them. (1) a force load's declared `direction` never reached the solver: a
+  `ConstraintForce` re-derives `DirectionVector` from its referenced face's
+  outward normal every time it executes, and `analysis.addObject()` alone does
+  that, so a beam asked for 500 N downward was solved as 500 N of axial tension -
+  wrong by ~600x, silently. it is now re-asserted immediately before each solve
+  and verified into the emitted `*CLOAD` block. (2) the mesh was 1st order
+  (FreeCAD's gmsh default) and 4-node tets shear-lock in bending. the scale of
+  that was the surprise: a stocky cantilever read 21% under its closed form, but
+  planter's floor_slat - thin, L/h = 25 - read **0.176 mm against a fixed-fixed
+  theory of 0.905, low by 5.1x**, and its modal frequencies correspondingly high.
+  2nd-order tets bring the same slat to 0.896 mm, within **1.0%** of theory. they
+  have to be *straight-edged* (`SecondOrderLinear`): gmsh otherwise curves midside
+  nodes onto the geometry and inverts elements around small features, which ccx
+  rejects outright ("nonpositive jacobian") - planter's drainage holes did exactly
+  that. R6.1/R6.2 extended; covered by `tests/test_fem.py`, which now checks both
+  load paths against closed-form beam theory rather than against themselves, the
+  only kind of assertion that could have caught either bug.
+  **projects must re-tune `mesh_size` upward**: it is ~8x the nodes at the same
+  value, and a mesh_size chosen to fight the old stiff elements can now exhaust
+  the solver (planter's floor_slat at its declared 8.0 dies mid-step at 1.65M dof;
+  16.0 solves in ~2 min and is the accurate number quoted above). coarser and
+  quadratic beats finer and linear on both accuracy and cost.
+- **a failed command says why.** `freecadcmd` loses a failure two ways, and both
+  bit: it discards python's buffered stdout when a command exits non-zero, so a
+  redirected or piped `fcad check` failure printed *nothing at all* (on a terminal
+  it printed fine, which is what hid it - CI and every logged run got the bare
+  status), and it never prints the message a `SystemExit` carries, so fcad's own
+  FEM diagnostics were swallowed whole. `_entry` now flushes on the way out and
+  prints those messages itself. the FEM one also stopped being actively
+  misleading: it said "try a smaller mesh_size" when the dominant failure with
+  quadratic elements is a mesh too *large* to solve, so it now names both
+  directions and reports the node count and mesh size it actually used. R3.1
+  extended; covered by `tests/test_errors.py`, which drives child processes with
+  stdout on a pipe, since a pty cannot reproduce it.
 - **built files open view-ready and framed.** opening an fcad-built assembly showed
   nothing at all: visibility is gui state, held in the zip's `GuiDocument.xml`,
   freecadcmd has no `ViewObject` to write one, and without it every object restores
@@ -150,7 +246,9 @@
   wiring, `SCHEMA`, `ENUM_CHOICES`, `WOOD` dict (now `MATERIAL = "wood"`) and
   `PartSpec.qty`. re-verified end to end through the cli: `make all`/`check` clean,
   bom byte-identical, `fem floor_slat` still 4.91 MPa / 0.176 mm /
-  632/1722/1778 Hz. covered by `tests/test_contract.py`: a synthetic single-file
+  632/1722/1778 Hz (unchanged by that refactor, which was the point - but those
+  figures were themselves wrong, see the 1st-order tet entry above). covered by
+  `tests/test_contract.py`: a synthetic single-file
   project loaded + built end to end (inferred types/groups, enum dropdown,
   fully-constrained defining sketch, auto-ground, computed bom, material default +
   registry), through both the directory and the `.fcad`-file load paths.

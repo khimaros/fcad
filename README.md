@@ -93,8 +93,10 @@ fcad diff-open [TARGET]   open a precomputed diff in the gui (instant)
 fcad pdf                  dimensioned techdraw pdfs
 fcad clean                remove dist/
 fcad info                 print the resolved configuration
+fcad api-docs [DIR]       freecad api reference for the installed build
 fcad install-macro        install the rebuild macro into FreeCAD's macro dir
 fcad install-git          make `git diff` on a .fcad file open the 3d diff
+fcad install-skill        install/refresh the freecad-python agent skill
 fcad help [COMMAND]       show usage (top-level, or for one command)
 ```
 
@@ -244,31 +246,104 @@ headlessly, writing the analysis doc plus a numpy result bundle
 surface colored by von Mises stress, and `fcad fem-animate` writes a deformation
 sweep plus one animation per eigenmode (`--modal`/`--modes K`). the `assembly`
 target fuses the structural solids into one bonded body; a single part is solved
-on its own.
+on its own; `fcad fem all` works through every case the project declares.
+
+the bundle carries `von_mises_p95`/`von_mises_p99` beside `von_mises`. reach for
+those first: the nodal maximum lands on whatever singularity the model contains
+-- a clamped face, the sharp internal corner of a notch or a drilled hole --
+where linear elasticity has no finite answer, so it reports the mesh rather than
+the part. a notched planter floor board reads 110.6 MPa at its worst node and
+6.31 at p95, and a mesh reseed has swung a maximum by two orders of magnitude
+while its p95 stayed put.
+
+the mesh is second-order, which matters more than it sounds: the 4-node tets
+FreeCAD meshes with by default are over-stiff in bending and understate deflection
+and stress by ~20% at the mesh sizes a build picks, so `mesh_size` is a knob for
+resolving features rather than a workaround for a stiff solve.
 
 fcad carries no model knowledge, so the analysis inputs come from an optional
 `FEM` global (or `fem=` on an explicit `Project`): a mapping `{target: case}`
-(or a callable). each *case* declares the fixed faces, loads, self-weight, mesh
-size and mode count; faces are picked by **geometry predicate**
-(`fcad.fem_select`: `min_along("z")`, `max_along("x")`, `normal_dir(...)`, ...),
-never by fragile face indices. material is a FreeCAD library card name, an fcad
-alias (`"steel"`, `"aluminum"`, `"wood"`, ...), a name from your own `MATERIALS`,
-or an explicit `{"E","nu","rho"}` dict; set a project-wide `MATERIAL` default and
-a case need not repeat it. for example, the planter (all wood) states a floor
-board fixed at both ends under soil pressure:
+(or a callable). each *case* declares the fixed faces, partial supports, loads,
+self-weight, gravity direction, mesh size and mode count; faces are picked by
+**geometry predicate** (`fcad.fem_select`: `min_along("z")`, `max_along("x")`,
+`normal_dir(...)`, ...), never by fragile face indices. material is a FreeCAD
+library card name, an fcad alias (`"steel"`, `"aluminum"`, `"wood"`, ...), a name
+from your own `MATERIALS`, or an explicit `{"E","nu","rho"}` dict; set a
+project-wide `MATERIAL` default and a case need not repeat it. for example, the
+planter (all wood) states a floor board under soil pressure:
 
 ```python
 from fcad import fem_select as fs
 
 MATERIAL = "wood"   # project default; fcad ships the softwood card
 FEM = {"floor_slat": dict(
-    fixed=[fs.min_along("x"), fs.max_along("x")],
-    loads=[dict(kind="pressure", faces=[fs.max_along("z")], magnitude=0.02)],
-    modes=3)}
+    supports=[dict(faces=[fs.min_along("x")], fix="xyz"),   # clamp
+              dict(faces=[fs.max_along("x")], fix="yz")],   # roller
+    loads=[dict(kind="pressure", faces=[fs.max_along("z")], magnitude=0.0095)],
+    self_weight=True)}
 ```
+
+`fixed` clamps a face outright. `supports` restrains only the axes named in
+`fix`, which is what you want for a beam: a fully fixed face cannot rotate, so
+clamping both ends of one reads far stiffer than a member merely resting on its
+bearings. face selectors cannot isolate an edge, so a true simple support is
+still out of reach -- clamp one end, roller the other, and a uniformly loaded
+beam at least carries the right peak moment. `gravity` is a direction in the
+part's own stock frame, which is the frame a single part solves in: a member the
+assembly stands on edge does not see `-Z` as down.
 
 without a `FEM` descriptor a target still solves under a default (fix the base,
 self-weight, a steel card). needs `gmsh` + `ccx` on `PATH`.
+
+## api reference for your FreeCAD
+
+```
+fcad api-docs             # -> dist/api/
+fcad api-docs ~/notes/fc  # or anywhere you like
+```
+
+writes five markdown files describing the FreeCAD **you have installed**: every
+TypeId `doc.addObject()` accepts, each workbench's `make*` factories with their
+call signatures, and property tables giving each property's name, type, default
+and enum values. it documents the toolchain rather than a model, so it needs no
+project and touches nothing you have built.
+
+the point is that nothing in it is remembered or transcribed. real objects are
+created and their `PropertiesList` / `getTypeIdOfProperty` /
+`getEnumerationsOfProperty` read back, so the answer matches your build by
+construction. that is worth having because the usual sources quietly do not: the
+wiki documents the *gui* and often never names the property behind a checkbox -
+a displacement constraint's per-axis freedoms are `xFree` / `yFree` / `zFree`,
+which appear nowhere in 2600 pages of it - and remembered api knowledge rots as
+names move between releases (`Support` -> `AttachmentSupport`).
+
+useful when writing a project's `compute`, and useful to point an llm/agent at
+instead of letting it guess property names.
+
+### as an agent skill
+
+```
+fcad install-skill        # -> ~/.claude/skills/freecad-python/
+```
+
+installs the skill fcad ships: scripting rules and traps, 52 curated pages of the
+FreeCAD wiki (CC0), and the `api/` reference above generated for *your* FreeCAD.
+that last part is why the skill cannot just be committed somewhere complete -
+half of it only exists once it meets the machine it runs on.
+
+the wiki pages and `api/` answer different questions, which is why both are
+there: `api/` says a property exists, what type it is and what it accepts; the
+wiki says what it *means* and how it is normally used - the FeaturePython
+lifecycle, attachment, topological traversal, constraint construction. the subset
+is deliberate. the full export is 2630 pages and 22 MB, of which 599 are stubs
+and 926 are gui pages with no python in them; the 52 kept are ~2% of the files
+and carry essentially all of the scripting value.
+
+re-run it after a FreeCAD upgrade. it records which build the reference
+describes and regenerates only when that (or the shipped `SKILL.md`) has
+changed, so the common case costs a tenth of a second and says so; `--force`
+regenerates regardless. it overwrites only what it ships and never deletes, so
+if you clone the full wiki export in beside it your extra pages survive.
 
 ## architecture
 

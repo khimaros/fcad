@@ -20,9 +20,31 @@ def _bootstrap():
 
 
 def main(argv):
-    _bootstrap()
-    cmd = argv[0] if argv else "all"
+    """route one command, making sure its failure survives the trip out.
 
+    freecadcmd's embedded interpreter loses a failure two ways, and a command that
+    explained itself perfectly well still reached the user as a bare exit status:
+
+    - it discards whatever python holds buffered on stdout when a command exits
+      non-zero, and stdout is block-buffered whenever it is not a tty - so a
+      redirected or piped `fcad check` failure printed nothing at all, while the
+      same run on a terminal printed in full. hence the flush.
+    - it never prints the message a `SystemExit` carries, so the deliberate
+      diagnostics ("CalculiX produced no result for ... try a smaller mesh_size")
+      vanished outright. so we print those ourselves and exit 1."""
+    _bootstrap()
+    try:
+        _route(argv[0] if argv else "all")
+    except SystemExit as e:
+        if not isinstance(e.code, str):
+            raise
+        print(e.code)
+        raise SystemExit(1)
+    finally:
+        sys.stdout.flush()
+
+
+def _route(cmd):
     if cmd == "view":
         from fcad.freecad import view
         view.main()
@@ -41,6 +63,10 @@ def main(argv):
     elif cmd == "fem":
         from fcad.freecad import fem
         fem.main(os.environ.get("FCAD_TARGET", "assembly"))
+    elif cmd == "api-docs":
+        # documents the freecad build, not a model, so it loads no project.
+        from fcad.freecad import api_docs
+        api_docs.main()
     else:
         from fcad.freecad import dispatch
         from fcad.loader import load_project

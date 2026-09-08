@@ -26,6 +26,15 @@ fixture project under `tests/` and assert the artifacts in `dist/`. the tests
 require FreeCAD 1.1.x on `PATH` (the build/validate paths exercise the real
 kernel).
 
+two things the suite has to keep honest about itself, both learned the hard way:
+
+- assert *values*, not self-consistency, wherever a closed form exists. "it
+  deflected" passes just as happily on a solve that loaded the wrong axis.
+- reproduce the real io. `freecadcmd` drops buffered stdout on a non-zero exit,
+  and stdout is only block-buffered when it is **not** a tty, so a test that
+  captures in-process (or runs on a pty) cannot see it. `tests/test_check.py`
+  spawns a child with stdout on a pipe for exactly that reason.
+
 before committing, run:
 
 ```
@@ -232,9 +241,22 @@ for the script name.
   `DisplacementVectors`, `NodeNumbers`, and `.Mesh.FemMesh` (`Nodes`, `Volumes`,
   `getElementNodes`) with no VTK. gotchas: (1) **internal units**: force is mN and
   pressure is mN/mm^2, so pass quantity strings (`"500 N"`, `"0.02 MPa"`), not bare
-  floats, or you are off by 1000x. (2) a force **direction** needs no edge ref: set
-  `force.DirectionVector` directly (it survives `update_objects`); `Direction` left
-  empty. (3) **modal** = `solver.AnalysisType="frequency"` + `solver.EigenmodesCount`;
+  floats, or you are off by 1000x. (2) a force **direction** needs no edge ref -
+  set `force.DirectionVector` and leave `Direction` empty - but it does **not
+  stay set**: a ConstraintForce re-derives it from its referenced face's outward
+  normal every time it executes, and `analysis.addObject()` alone is enough to
+  trigger that, never mind the later recompute. so assign it immediately before
+  the solver reads it (`fem._reassert_directions`, called from `_run`), and
+  confirm by grepping the emitted `*CLOAD` block for the right component column.
+  set at construction it is silently replaced and the solve *succeeds*, loading
+  the model along the face normal instead. (2a) the gmsh mesher defaults to
+  `ElementOrder = "1st"`, and 4-node tets are grossly over-stiff in bending: a
+  cantilever reads ~21% under its closed form and converges on it only from below.
+  set `mesh.ElementOrder = "2nd"` - quadratic tets hit ~0.5% with a quarter the
+  elements, and CalculiX solves C3D10 natively. anything checking FEM numbers
+  should check them against a closed form, not against themselves; both of these
+  bugs produced confidently wrong results that no self-consistency test could see.
+  (3) **modal** = `solver.AnalysisType="frequency"` + `solver.EigenmodesCount`;
   results come back one `FemResultObject` per mode, each with `.EigenmodeFrequency`
   (Hz). (4) **nonpositive jacobian** (ccx exit 201): gmsh emits inverted tets on
   heavily-notched/thin solids regardless of mesh size, so detect a missing result
