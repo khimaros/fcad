@@ -252,11 +252,74 @@ the bundle carries `von_mises_p95`/`von_mises_p99` beside `von_mises`. reach for
 those first: the nodal maximum lands on whatever singularity the model contains
 -- a clamped face, the sharp internal corner of a notch or a drilled hole --
 where linear elasticity has no finite answer, so it reports the mesh rather than
-the part. a notched planter floor board reads 205.8 MPa at its worst node and
-5.18 at p95, and a mesh reseed has swung a maximum by two orders of magnitude
-while its p95 stayed put. read p95 as a floor on the field stress rather than a
-peak, though: on a clamped model the moment peaks at the constrained end, and
-those nodes are precisely what a percentile discards.
+the part. how badly is easy to underrate. re-solving one unchanged planter board
+-- same geometry, same load, same `mesh_size`, only a different mesh seed --
+moved its reported maximum from 6.2 MPa to 2191.1, a factor of **350**, while
+p95 went 3.93 to 4.80 and the deflection did not move at all:
+
+```
+long_wall_slat    max   6.2 MPa  ->  2191.1 MPa    x350
+                  p95   3.93     ->     4.80       +22%
+                  disp  1.940 mm ->     1.940 mm   identical
+```
+
+and that is a plain prismatic board with no holes in it, so the singularity is
+the clamped face alone. the shipped cantilever shows the same thing without any
+reseeding -- refine `mesh_size` from 6 to 2 and its peak climbs 74.9 -> 12848 MPa
+while p95 stays near 70 and the tip deflection stays at 1.05 mm. treat `max` as a
+sample of the mesh, not a property of the part. read p95 as a floor on the field
+stress rather than a peak, though: on a clamped model the moment peaks at the
+constrained end, and those nodes are precisely what a percentile discards.
+
+the pictures follow the same rule. `fem-render` and `fem-animate` scale the
+colormap to `von_mises_p99`, not to the peak -- scaled to a 12848 MPa
+singularity the beam above renders as one flat purple slab -- and the plot states
+both the clamp and the true maximum, so nothing is hidden. `FCAD_FEM_VMAX` sets
+the top of the scale yourself.
+
+an animation is a **camera** crossed with a **subject**, the same vocabulary in
+`animate` and `fem-animate`:
+
+```
+fcad fem-animate --subject static --camera orbit   # the useful one
+fcad fem-animate --subject modes                   # just the eigenmodes
+fcad animate                                       # the assembly, building itself
+fcad animate --subject static                      # or just orbit the finished model
+fcad animate beam --camera turntable               # a single part, level spin
+```
+
+the cameras are one motion at three amplitudes: `orbit` turns and sweeps its
+elevation so the top and underside come into view, `turntable` turns level, and
+`fixed` holds `FCAD_ELEV`/`FCAD_AZIM`.
+
+`--subject static --camera orbit` holds the deformed shape at peak deflection and
+flies around it, which is usually what you want: a structure deflects where it is
+*supported*, and the supports are underneath, so a fixed view from above points
+away from the answer. holding also means every face is seen at the same
+deflection and can be compared -- one flex cycle per turn makes that impossible,
+so a flexing orbit runs four cycles per turn (`FCAD_FEM_CYCLES`). the camera is
+`FCAD_ELEV` (elevation, or the centre of the sweep), `FCAD_AZIM` (the still's
+azimuth, or the orbit's start) and `FCAD_TILT` (sweep amplitude; 0 makes an orbit
+hold its elevation) in every renderer.
+
+`fcad animate` writes `dist/assemble_<target>.{mp4,gif}`: the parts flying in one
+at a time to build the model. that is the default for the assembly, because a
+model building itself says more in ten seconds than a spin does; a single part
+has nothing to assemble, so `fcad animate beam` spins instead. `--subject static`
+orbits the finished assembly when that is what you want. it uses the part STLs
+plus the placements a build records, not the assembly STL -- that one is a single
+welded lump with no part boundaries left in it.
+
+the arrival order matters more than it sounds, and fcad reads it off flags your
+project already declares. `--order grounded` (the default) walks outward from the
+part flagged `grounded` over what actually touches what, so nothing ever arrives
+floating, and holds parts flagged `embeds` to the end -- a screw should not be
+driven before the board it holds. both flags are the ones you already write:
+`grounded` is what anchors the assembly, and `embeds` is what excludes fasteners
+from `check`'s interference test, so a project that already models its screws
+needs no extra annotation. on the fastenplates example a plain z-sort drives the
+screw home between the two plates; `grounded` does not.
+`--order bottom-up|top-down|declared` are the escape hatches.
 
 the mesh is second-order, which matters more than it sounds: the 4-node tets
 FreeCAD meshes with by default are over-stiff in bending and understate deflection
@@ -287,10 +350,14 @@ FEM = {"floor_slat": dict(
 
 `fixed` clamps a face outright. `supports` restrains only the axes named in
 `fix`, which is what you want for a beam: a fully fixed face cannot rotate, so
-clamping both ends of one reads far stiffer than a member merely resting on its
-bearings. face selectors cannot isolate an edge, so a true simple support is
-still out of reach -- clamp one end, roller the other, and a uniformly loaded
-beam at least carries the right peak moment. `gravity` is a direction in the
+clamping both ends of one reads exactly 5x stiffer than a member resting on its
+bearings, and a third light on peak moment. face selectors cannot isolate an
+edge, so a true simple support is still out of reach -- clamp one end, roller
+the other, and a uniformly loaded beam carries the right `wL^2/8` and 2.41x the
+right deflection, which is 2.08x better than clamping both. all three ratios are
+closed form for a UDL (`wL^4/384EI` clamped, `wL^4/185EI` clamped-and-rollered,
+`5wL^4/384EI` on bearings) and depend on neither section nor span, so they are
+worth checking a model against. `gravity` is a direction in the
 part's own stock frame, which is the frame a single part solves in: a member the
 assembly stands on edge does not see `-Z` as down.
 
@@ -335,6 +402,15 @@ ceiling for both -- it is also installed as an rlimit on every child, which the
 mesher and solver inherit, so a runaway hits a wall of its own instead of the
 kernel's. the estimate is a fit, so raise the ceiling if your machine really has
 the memory; what fcad will not do is find out by being killed.
+
+solving the same design twice gives the same numbers, which took pinning both
+tools to one thread. gmsh's parallel mesher reseeds (four identical runs of one
+358k-node mesh gave four node counts), and multithreaded CalculiX is worse than
+unrepeatable -- ten runs of a single byte-identical input returned four tip
+deflections spanning 6.5%, the low ones 6.4% under a closed form the
+single-threaded run matched to 0.25%. that costs ~15% of the mesh and 1.2-1.6x of
+the solve; `FCAD_FEM_MESH_THREADS` and `FCAD_FEM_THREADS` take it back if you
+would rather have the wall clock than the answer.
 
 without a `FEM` descriptor a target still solves under a default (fix the base,
 self-weight, a steel card). needs `gmsh` + `ccx` on `PATH`.

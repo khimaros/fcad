@@ -9,8 +9,112 @@
   (both confirmed available).
 - **publish to PyPI.** currently local/git install only.
 
+## later
+
+- **decimate the FEM animator's mesh.** `animate` runs `render.cluster` because
+  a drilled assembly's stl is far too dense to redraw per frame; `fem_animate`
+  draws the raw boundary mesh, which is fine at tens of thousands of nodes and
+  will not be at hundreds of thousands. the wrinkle is that the field is
+  per-node, so a FEM decimation has to carry it through the clustering rather
+  than just keeping the silhouette.
+
 ## done
 
+- **`animate`: the model building itself.** each instance flies in from an
+  exploded position to where it belongs, one at a time. this is now what a bare
+  `fcad animate` does, because a model assembling itself says more in ten seconds
+  than a turntable does; `--subject static` still orbits the finished thing, and
+  a single part, having nothing to assemble, still spins. naming a part *and*
+  asking to assemble is an error rather than a silent whole-model clip. it runs
+  off the part stls plus the placements a build records, never the assembly stl -
+  that one is a single welded lump with no part boundaries left in it, while the
+  parts and their placements *are* the model with its seams still in.
+
+  the ordering is the part worth getting right, and it needed no new affordance:
+  fcad already had all three inputs. `grounded` names the anchor. `embeds`
+  already means "fastener" - it is the flag that excludes screws from the
+  interference check. and the contact graph is arithmetic over geometry the
+  renderer already holds. so the default order is a breadth-first walk outward
+  from the anchor with the fasteners held to the end, and every part arrives
+  attached to something already there. a plain z-sort only looks equivalent: on
+  the shipped fastenplates example it drives the screw home *between* the two
+  plates it holds, which `tests/test_assemble.py` pins as the before/after.
+
+  what is deliberately *not* the source is the joint graph. `build_jointed_doc`
+  fixes every non-grounded part to a single datum, so it is a star with every
+  part one hop from the anchor - it exists to make the assembly fully constrained
+  and says nothing about what touches what. the two flags travel out in a new
+  `<name>-parts.json` rather than as extra keys in the placements file, whose
+  shape is `{part: [placement]}` and whose readers would be tripped by a
+  top-level key that is not a part name.
+- **the animators now agree: a camera crossed with a subject.** `animate` moved
+  the camera and not the model; `fem-animate` moved the model and not the camera.
+  each had exactly what the other lacked, which was accidental rather than
+  designed. both now take `--camera orbit|fixed` through one shared
+  `render.aim(ax, frac)`, and `fem-animate` adds `--subject all|flex|static|
+  modes`. the useful new combination is `--subject static --camera orbit`: the
+  deformed shape held at peak and viewed from everywhere, so every face is seen
+  at the *same* deflection and can actually be compared - which one flex cycle
+  per turn makes impossible, so a flexing orbit runs four cycles per turn
+  (`FCAD_FEM_CYCLES`) instead. holding also lets the view cube be squared to the
+  deformed geometry, so the flexed shape cannot walk out of frame. the collision
+  this forced out into the open: `FCAD_ELEV` meant a fixed elevation to the still
+  renderers and the centre of a sweep to `animate`, with different defaults (22
+  and 20). one meaning now, in one place, with `FCAD_TILT=0` collapsing an orbit
+  to a fixed camera - which is what makes `fixed` a special case rather than a
+  second code path. the vocabulary lives in the import-free `fcad/render/
+  __init__.py`, because the cli must name these in `--help` without dragging
+  matplotlib into every `fcad` startup.
+
+- **a FEM picture scaled to its singularity showed nothing.** `fem-render` and
+  `fem-animate` normalized the colormap to the nodal maximum, which is the one
+  value in the bundle that reports the mesh rather than the part. on the shipped
+  cantilever, refining `mesh_size` from 6 to 2 moves the peak from 74.9 to
+  **12848 MPa** while p95 stays near 70 and the deflection stays at 1.05 mm - so
+  the plot put the entire beam in the bottom 0.6% of the scale and rendered as a
+  uniform slab. it is the same defect `von_mises_p95` already fixed for the
+  reported number, still present in the image, and worst on an assembly, which is
+  where a picture is most wanted. the scale now clamps to `von_mises_p99` (it was
+  already in the npz), `FCAD_FEM_VMAX` overrides, and the plot states the clamp
+  *and* the true maximum rather than hiding it. `fem-animate` also honours
+  `FCAD_ELEV`/`FCAD_AZIM` now, which it silently ignored: a loaded structure
+  deflects where it is supported and the supports are underneath, so the one view
+  that shows a load path was reachable for a still and not for a clip.
+- **the same design now meshes the same way twice.** gmsh's parallel 3d
+  algorithm is not reproducible: four identical runs of one 358k-node mesh
+  returned four different node counts, and pinning `Mesh.RandomSeed` does not
+  help because the variation is thread interleaving, not the seed. FreeCAD sets
+  `General.NumThreads` to the cpu count, so every fcad solve inherited it. that
+  is not cosmetic - it is what lets an *unchanged* model re-solve to a different
+  answer, and the peak von Mises has swung **350x** between two seeds of one
+  plain prismatic board (6.2 -> 2191.1 MPa) while its deflection held to four
+  figures. it also made fcad's own suite quietly flaky: the cantilever theory
+  check asserts 5% and the reseed spread at its mesh size reached 4.8%, with one
+  run drawing 19%. fcad now pins the mesher to one thread for the duration of a
+  mesh and puts the preference back afterwards, since a gui session meshing
+  single-threaded because a build ran is not a trade to make on someone's
+  behalf. it costs about 15% of the mesh step (6.0s -> 6.9s at 358k nodes),
+  which is the cheap phase next to the solve; `FCAD_FEM_MESH_THREADS` takes it
+  back for anyone who would rather have the wall clock than the reproducibility.
+  that was half of it. the other half was **the solver, and it was not a
+  reproducibility problem but a correctness one.** an excursion survived the mesh
+  fix - about one run in eight, up to 15% - on a CalculiX input proven
+  byte-identical run to run. ten runs of that one fixed `.inp` at 16 threads
+  returned **four different tip deflections** spanning 6.5%, the low ones 6.4%
+  under a closed form that the single-threaded run matched to 0.25%; ten
+  single-threaded runs returned one answer. so a multithreaded CalculiX solve
+  here is not merely unrepeatable, it is intermittently *wrong*, and wrong in the
+  direction that flatters a part. it had been failing this repo's own beam-theory
+  check intermittently all along.
+
+  getting one thread meant running ccx by hand: FreeCAD's `start_ccx` forces
+  `OMP_NUM_THREADS` to the cpu count, and its `AnalysisNumCPUs` preference only
+  ever raises the count - setting it to 1 selects the cpu-count branch - so there
+  is no supported way down. that costs 1.2-1.6x wall clock (26.7s -> 41.9s at
+  100k nodes) and `FCAD_FEM_THREADS` takes it back, though it is hard to see why
+  anyone would want to. with both halves pinned a result is reproducible end to
+  end, and `tests/test_fem.py` now asserts equality on deflection and peak stress
+  rather than a tolerance.
 - **a solve can no longer take the machine with it.** `fcad fem` was the one
   command that failed by exhaustion: gmsh ran 14 minutes at 7.6 GB on a fastened
   assembly without finishing, and CalculiX was OOM-killed (exit -9) three times
@@ -45,11 +149,17 @@
   declare `supports=[dict(faces=[...], fix="yz"), ...]` beside `fixed`,
   restraining only the named translation axes via `makeConstraintDisplacement`.
   a fully fixed face is a clamp -- every node on it is pinned, so it cannot
-  rotate -- and clamping both ends of a member reads ~5x stiff against a beam
+  rotate -- and clamping both ends of a member reads 5x stiff against a beam
   that merely rests on its bearings, understating its peak moment by a third.
   face selectors still cannot isolate an edge, so a true simple support is out
   of reach; clamp one end and roller the other and a uniformly loaded beam at
-  least carries the right `wL^2/8`. (the property names came straight out of
+  least carries the right `wL^2/8`, recovering 2.08x of that 5x and leaving the
+  model 2.41x stiff. those three are exact and carry no caveat about section or
+  span -- a UDL deflects `wL^4/384EI` clamped both ends, `wL^4/185EI` clamped and
+  rollered, `5wL^4/384EI` on bearings, and 384/185 x 925/384 = 5 -- so a beam
+  that does not reproduce them has a bug rather than a shape. `tests/test_fem.py`
+  measures 0.0156 mm against 0.0320, which is 2.05 against a predicted 2.076, and
+  a `fix` silently ignored would read 1.00. (the property names came straight out of
   `api-docs`, which is the reason it exists: `xFree`/`yFree`/`zFree` appear
   nowhere in the wiki.)
 - **`undrilled`, which is what makes a whole-assembly solve possible.** a case
@@ -69,7 +179,11 @@
   where linear elasticity has no finite answer, so it reports the mesh rather
   than the part. a notched planter floor board reads 205.8 MPa at its worst node
   and 5.18 at p95; a mesh reseed swung one runner's maximum from 1015 to 10.9
-  between two runs while its p95 moved only from 7.7 to 4.0. p95 is a floor on
+  between two runs while its p95 moved only from 7.7 to 4.0. the sharpest case
+  so far is an *unchanged* planter board re-solved on a new seed: max 6.2 ->
+  2191.1 MPa, a factor of 350, against p95 3.93 -> 4.80 and a deflection stable
+  to four figures (1.940 mm both times) - and that board is plain and prismatic,
+  so the singularity is the clamped face and nothing else. p95 is a floor on
   the field stress, not a peak: on a clamped model the moment maximum sits at
   the constrained end, which is exactly what the percentile throws away.
 - **`api-docs`: a build-accurate FreeCAD api reference.** `fcad api-docs [DIR]`

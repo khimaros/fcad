@@ -14,6 +14,7 @@ von Mises, displacement and mode shapes) that the plain-python renderer consumes
 """
 
 import os
+import subprocess
 
 import numpy as np
 import FreeCAD as App
@@ -54,6 +55,34 @@ GRAVITY = "9.81 m/s^2"
 ELEMENT_ORDER = "2nd"
 SECOND_ORDER_LINEAR = True
 KILL_GRACE_MS = 5000       # gmsh gets this long to die before we stop waiting
+# one mesher thread, so the same design meshes the same way twice. gmsh's
+# parallel 3d algorithm is not reproducible - four identical runs of a 358k-node
+# mesh gave four node counts - and Mesh.RandomSeed does not help, because the
+# variation is thread interleaving rather than the seed. FreeCAD sets
+# General.NumThreads to the cpu count, so every solve inherited it. that lets an
+# unchanged model report a different answer: the peak von Mises has swung 350x
+# between two seeds of one plain board while its deflection held to four figures.
+# determinism costs ~15% of the mesh step, which is the cheap phase next to the
+# solve. MESH_THREADS_ENV takes it back; anything <= 0 leaves FreeCAD's default.
+GMSH_PREFS = "User parameter:BaseApp/Preferences/Mod/Fem/Gmsh"
+THREADS_PREF = "NumOfThreads"
+MESH_THREADS_ENV = "FCAD_FEM_MESH_THREADS"
+MESH_THREADS = 1
+# and one solver thread, which is not a reproducibility nicety but a correctness
+# one. on a single fixed .inp, ten 16-thread CalculiX runs returned *four*
+# different tip deflections spanning 6.5%, the low ones 6.4% under a closed form
+# that the single-threaded run matched to 0.25%; ten single-threaded runs
+# returned one answer. so a multithreaded solve here is not merely unrepeatable,
+# it is intermittently wrong, and wrong in the direction that flatters a part.
+# it costs 1.2-1.6x wall clock (26.7s -> 41.9s at 100k nodes).
+#
+# it has to be run by hand to get that: FreeCAD's start_ccx forces
+# OMP_NUM_THREADS to the cpu count, and its AnalysisNumCPUs preference only ever
+# raises the count - setting it to 1 selects the cpu-count branch - so there is
+# no supported way down. this is the same granular seam already used for the
+# mesher and for write_inp/load_results.
+CCX_THREADS_ENV = "FCAD_FEM_THREADS"
+CCX_THREADS = 1
 
 
 def _get(case, attr, default=None):
@@ -276,7 +305,29 @@ def _too_big(target, mesh, nodes, need, have):
 
 
 def _mesh(target, mesh):
-    """mesh with gmsh under a wall clock bound; return the node count.
+    """mesh with gmsh, reproducibly and under a wall clock bound.
+
+    the thread count is a preference, so it is set for the duration of this mesh
+    and put back: it belongs to the user, and a gui session left meshing
+    single-threaded because a build ran once is not a trade fcad gets to make on
+    their behalf."""
+    threads = int(os.environ.get(MESH_THREADS_ENV) or MESH_THREADS)
+    prefs = App.ParamGet(GMSH_PREFS)
+    prior = (prefs.GetInt(THREADS_PREF, 0)
+             if THREADS_PREF in prefs.GetInts() else None)
+    if threads > 0:
+        prefs.SetInt(THREADS_PREF, threads)
+    try:
+        return _gmsh(target, mesh)
+    finally:
+        if prior is None:
+            prefs.RemInt(THREADS_PREF)
+        else:
+            prefs.SetInt(THREADS_PREF, prior)
+
+
+def _gmsh(target, mesh):
+    """run the mesher and read the result back; return the node count.
 
     FreeCAD's create_mesh() waits forever - waitForFinished(-1) - and reports a
     mesher that failed only by leaving FemMesh empty, which then resurfaces
@@ -305,7 +356,13 @@ def _preflight(target, mesh, nodes):
     exit code of -9 and a desktop that has been in reclaim throughout. the
     estimate is a fit, so it is advisory in both directions - MEM_ENV raises the
     ceiling for a solve that really does fit, and limits.limit_child stands
-    behind it for one that really does not."""
+    behind it for one that really does not.
+
+    checked once, against the static solve, and that covers a modal run too: the
+    eigen solve adds only the Lanczos vectors on top of the same factorization -
+    measured at 5-7% more peak RSS over 8k to 54k nodes, where the fit's own
+    tolerance is wider. what modal really costs is time (1.6-1.9x), which is not
+    what this bounds."""
     have = limits.budget()
     need = limits.ccx_bytes(nodes)
     if have and need > have:
@@ -384,6 +441,21 @@ def _no_result(target, solver, mesh):
                float(mesh.CharacteristicLengthMax), limits.MEM_ENV))
 
 
+def _ccx(fea):
+    """run CalculiX on the written .inp, pinned to CCX_THREADS.
+
+    replaces fea.ccx_run() for the reason given at CCX_THREADS: the thread count
+    it forces changes the answer. failure is left to speak through the absence of
+    a result, which `_no_result` already reports properly."""
+    threads = int(os.environ.get(CCX_THREADS_ENV) or CCX_THREADS)
+    fea.setup_ccx()
+    job = os.path.splitext(os.path.basename(fea.inp_file_name))[0]
+    subprocess.run([fea.ccx_binary, "-i", job],
+                   cwd=os.path.dirname(fea.inp_file_name),
+                   env=dict(os.environ, OMP_NUM_THREADS=str(threads)),
+                   capture_output=True)
+
+
 def _run(analysis, solver, target, mesh, directions=()):
     _reassert_directions(directions)
     fea = ccxtools.FemToolsCcx(analysis, solver)
@@ -391,7 +463,7 @@ def _run(analysis, solver, target, mesh, directions=()):
     fea.update_objects()
     fea.setup_working_dir()
     fea.write_inp_file()
-    fea.ccx_run()
+    _ccx(fea)
     fea.load_results()
     results = [r for r in _result_objs(analysis) if r.Mesh is not None]
     if not results:

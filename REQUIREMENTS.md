@@ -40,6 +40,11 @@ never regress on them.
   `dist/<name>-placements.json`, whatever formats were selected: the 3d diff (R4.4)
   pairs instances across two revisions and cannot obtain the older revision's
   placements by calling the project's `compute`, which no longer exists in that form.
+  it records each part's `grounded`/`embeds` flags beside them in
+  `dist/<name>-parts.json`, for the same reason and for the assembly animation
+  (R4.3), which sequences on both and also runs outside FreeCAD. the two are
+  separate files because the placements file is `{part: [placement]}` and a
+  top-level key that is not a part name would be a trap for every reader of it.
 - R2.2 `build` accepts target tokens that select a subset:
   `parts assembly step stl svg dxf drawings sketches bom cutlist`; no token means
   `all`. multiple tokens union. stage-specific tokens keep their meaning
@@ -84,8 +89,30 @@ never regress on them.
   `--part NAME` opens a single part.
 - R4.2 `render [TARGET]` writes an offscreen shaded PNG of a built STL under plain
   python3 (no display). `TARGET` is `assembly` (default) or a part name.
-- R4.3 `animate [TARGET]` writes a turntable MP4 + GIF orbiting a built STL through
-  every side plus top and bottom, under plain python3.
+- R4.3 `animate [TARGET]` writes an MP4 + GIF of a built model under plain
+  python3, over a camera axis and a subject axis.
+  the **camera** is `orbit` (a full turn while the elevation sweeps, so every
+  side plus top and bottom comes into view; the default), `turntable` (that turn
+  held level) or `fixed`. it is the same camera every other renderer uses, so
+  `FCAD_ELEV`/`FCAD_AZIM`/`FCAD_TILT` mean one thing across all of them: the
+  elevation of a still or the centre of a sweep, the azimuth of a still or the
+  start of a turn, and the sweep amplitude (0 holding the elevation, which makes
+  an orbit a turntable).
+  the **subject** is `assemble` (the model building itself, each instance flying
+  in from an exploded position to where it belongs) or `static` (the model whole,
+  the camera doing the work). unspecified, it is `assemble` for the assembly and
+  `static` for a single part, which has nothing to assemble; `--subject static`
+  on the assembly must remain available, since orbiting the finished model is a
+  distinct thing to want. `assemble` names a part target is an error, not a
+  silent whole-model animation.
+  `assemble` is driven by the part STLs plus `<name>-placements.json` and
+  `<name>-parts.json`, never the assembly STL, which is one welded lump with no
+  part boundaries left in it. the arrival order (`--order`) defaults to
+  `grounded`: a breadth-first walk of the contact graph outward from the part
+  flagged `grounded`, with `embeds` parts held to the end, because a fastener
+  must not arrive before the structure it fastens. a model with no such flags
+  recorded, or none to assemble, falls back or fails loudly rather than animating
+  something misleading.
 - R4.4 the 3d geometry diff of the working tree vs git HEAD (green added / red
   removed / grey unchanged) builds the HEAD geometry in a throwaway git worktree,
   from that worktree's own copy of the design (never the working tree's, whether
@@ -167,7 +194,13 @@ never regress on them.
   the structural solids fused into one bonded body (parts flagged `embeds` excluded).
   the mesh is second-order: 1st-order tets are over-stiff in bending and understate
   deflection and stress by ~20% at usable mesh sizes, which is a wrong answer rather
-  than a coarse one.
+  than a coarse one. a solve is reproducible: the same design solved twice gives
+  the same numbers, not merely similar ones. that requires pinning both external
+  tools to one thread, because gmsh's parallel 3d algorithm reseeds and a
+  multithreaded CalculiX intermittently returns a materially wrong answer (four
+  results spanning 6.5% over ten runs of one identical input, the low ones 6.4%
+  under the closed form single-threaded matched to 0.25%). `FCAD_FEM_MESH_THREADS`
+  and `FCAD_FEM_THREADS` override, at the cost of that guarantee.
 - R6.2 a project may declare per-target FEM inputs (material, fixed faces, loads,
   self-weight, mesh size, modes) via an optional `Project.fem` descriptor; faces are
   selected by geometry predicate, never by fragile face indices. a force load acts
@@ -186,7 +219,14 @@ never regress on them.
 - R6.4 `fem-render [TARGET]` writes an offscreen PNG of the deformed surface colored
   by von Mises with a colorbar; `fem-animate [TARGET]` writes a deformation-sweep
   MP4+GIF plus one MP4+GIF per eigenmode. both run under plain python3 (no FreeCAD,
-  no VTK).
+  no VTK). neither scales its colormap to the nodal maximum, which sits on a
+  singularity and reports the mesh rather than the part: the top of the scale is
+  `von_mises_p99` (or `FCAD_FEM_VMAX`), and a plot that clamped says so and still
+  states the true maximum, so nothing is hidden. `fem-animate` is a camera
+  (`--camera orbit|turntable|fixed`, R4.3's) crossed with a subject
+  (`--subject`): the flex sweep, the shape held at peak deflection, the
+  eigenmodes, or all of them. a subject that yields no clips fails loudly rather
+  than writing nothing quietly.
 - R6.5 a solve is bounded before it can exhaust the machine. having meshed, fcad
   estimates what a direct CalculiX solve of that node count needs and refuses -
   non-zero, with no partial artifact, and *before* CalculiX starts - one that

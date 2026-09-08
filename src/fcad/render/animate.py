@@ -1,54 +1,117 @@
-"""turntable animation: orbit the camera a full turn around a built stl.
+"""animate a built model: the camera moving around it, or it assembling itself.
 
 plain python (no FreeCAD), like render.py, reusing render's mesh loading and
-shaded-axes setup, spins the azimuth 360 so every side comes into view, and
-writes both a video and a gif (dist/spin_<target>.{mp4,gif}).
+shaded-axes setup, and writing both a video and a gif.
+
+two subjects, the same axis fem-animate has:
+  assemble  the parts flying in one at a time to build it; the default for the
+            assembly, because a model building itself says more in ten seconds
+            than a spin does (dist/assemble_<target>.{mp4,gif})
+  static    the model whole, the camera doing the work. the default for a single
+            part, which has nothing to assemble (dist/spin_<target>.{mp4,gif})
+
+`assemble` needs the part stls and the placements a build records, not the
+assembly stl, which is one welded lump with no part boundaries left in it. see
+assemble.py.
 
 the assembly mesh is far too dense (hundreds of thousands of triangles) for
 matplotlib to redraw per frame, so it is vertex-cluster decimated first
 (render.cluster); a turntable only needs the silhouette.
-the camera spins a full turn (every side) while its elevation sweeps one cycle
-from above to below, so the top and bottom come into view too; both motions
-complete exactly once per loop, so the gif/mp4 loop without a visible seam.
-  env: FCAD_FRAMES (default 72), FCAD_FPS (10), FCAD_ELEV (base 20),
-       FCAD_TILT (elevation sweep amplitude, 62), FCAD_DPI (90),
-       FCAD_CLUSTER (grid mm, default 4; 0 disables)
+
+the camera is `render.aim`, shared with the still renderers and with
+fem_animate: `orbit` spins a full turn while the elevation sweeps one cycle so
+every side including top and underside comes into view, `turntable` spins level,
+and `fixed` holds FCAD_ELEV/FCAD_AZIM. an stl has nothing to animate, so this is
+the camera half of the same vocabulary fem-animate uses for both halves.
+  env: FCAD_FRAMES (default 72), FCAD_FPS (10), FCAD_DPI (90),
+       FCAD_ELEV/FCAD_AZIM (viewpoint, or an orbit's centre/start),
+       FCAD_TILT (elevation sweep amplitude, 62; 0 = no sweep),
+       FCAD_CLUSTER (grid mm, default 4; 0 disables),
+       FCAD_EXPLODE/FCAD_FLIGHT/FCAD_SETTLE (the assemble timing, see assemble.py)
 """
 
-import math
 import os
 import sys
 
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 
-from fcad.render import render
+from fcad.render import assemble, render
 
 FRAMES = int(os.environ.get("FCAD_FRAMES", 72))
 FPS = int(os.environ.get("FCAD_FPS", 10))
-ELEV = float(os.environ.get("FCAD_ELEV", 20))   # base (mid-sweep) elevation
-TILT = float(os.environ.get("FCAD_TILT", 62))   # elevation sweep amplitude
 DPI = int(os.environ.get("FCAD_DPI", 90))
 CLUSTER = float(os.environ.get("FCAD_CLUSTER", 4.0))
 
 
-def animate(target="assembly", stem=None, name=None, dist=None):
-    name, dist = render._resolve(name, dist)
+def _static(fig, target, name, dist):
+    """the whole model, still: the camera is the only thing that moves."""
     tris = render.cluster(render.load_tris(target, name, dist), CLUSTER)
-    fig = plt.figure(figsize=(8, 8))
     ax = render.make_axes(fig, tris)
     ax.set_title("%s  (%d triangles)" % (target, len(tris)))
+    return ax, lambda frac: None
+
+
+def _assemble(fig, target, name, dist, how):
+    """the model building itself, one instance at a time.
+
+    the assembly stl cannot be used for this - it is a single welded lump with no
+    part boundaries left in it - so the pieces come from the part stls plus the
+    placements the build recorded, which together are the model with its seams
+    still in. the axes are squared to the *assembled* model rather than the
+    exploded one, so the finished state fills the frame and the parts fly in from
+    outside it, which is the right way round: the last second is what a viewer
+    actually looks at.
+
+    it always builds the whole model, so a part target is refused rather than
+    quietly animating something the caller did not ask for."""
+    if target not in ("assembly", name):
+        raise SystemExit(
+            "fcad animate: --subject assemble builds the whole assembly, but "
+            "TARGET names the part %r. drop the target, or use --subject static "
+            "to spin that part on its own." % target)
+    parts = assemble.order(assemble.instances(name, dist, CLUSTER), how,
+                           assemble.flags(name, dist))
+    if not parts:
+        raise SystemExit("fcad animate: no part stls + placements to assemble "
+                         "for %r - run `fcad build parts assembly` first" % target)
+    home = [tris for _, tris in parts]
+    offs = assemble.offsets(parts)
+    ax = render.make_axes(fig, np.concatenate(home))
+    colls = ax.collections[0]
+    ax.set_title("%s  assembling %d parts" % (target, len(parts)))
+
+    def pose(frac):
+        placed = [h + (1.0 - assemble.arrival(frac, i, len(parts))) * o
+                  for i, (h, o) in enumerate(zip(home, offs))]
+        colls.set_verts(np.concatenate(placed))
+
+    pose(0.0)
+    return ax, pose
+
+
+def animate(target="assembly", stem=None, name=None, dist=None, camera="orbit",
+            subject="assemble", order="grounded"):
+    name, dist = render._resolve(name, dist)
+    fig = plt.figure(figsize=(8, 8))
+    if subject == "assemble":
+        ax, pose = _assemble(fig, target, name, dist, order)
+    else:
+        ax, pose = _static(fig, target, name, dist)
+    render.aim(ax)
 
     def update(i):
-        f = i / FRAMES  # one full loop: a 360 spin + one up/down elevation cycle
-        ax.view_init(elev=ELEV + TILT * math.sin(2.0 * math.pi * f),
-                     azim=-180.0 + 360.0 * f)
+        frac = i / FRAMES
+        pose(frac)
+        render.aim(ax, frac, camera)
         return ()
 
     anim = FuncAnimation(fig, update, frames=FRAMES, interval=1000.0 / FPS)
-    stem = stem or os.path.join(dist, "spin_%s" % target)
+    stem = stem or os.path.join(
+        dist, ("assemble_%s" if subject == "assemble" else "spin_%s") % target)
     mp4, gif = stem + ".mp4", stem + ".gif"
     anim.save(mp4, writer=FFMpegWriter(fps=FPS), dpi=DPI)
     anim.save(gif, writer=PillowWriter(fps=FPS), dpi=DPI)
@@ -58,4 +121,6 @@ def animate(target="assembly", stem=None, name=None, dist=None):
 if __name__ == "__main__":
     args = sys.argv[1:]
     animate(args[0] if len(args) > 0 else "assembly",
-            args[1] if len(args) > 1 else None)
+            args[1] if len(args) > 1 else None,
+            camera=args[2] if len(args) > 2 else "orbit",
+            subject=args[3] if len(args) > 3 else "assemble")

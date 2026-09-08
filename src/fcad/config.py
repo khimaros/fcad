@@ -29,10 +29,19 @@ DEFAULT_FREECAD_GUI = "freecad"
 # lives here because both sides need it: the builder writes it inside freecadcmd,
 # the diff orchestrator reads it under the cli's own python.
 PLACEMENTS_SUFFIX = "-placements.json"
+# the per-part flags a build records beside them. deliberately a sibling file
+# rather than more keys in the placements json: that one's shape is
+# `{part: [placement]}`, the 3d diff reads it, and a top-level key that is not a
+# part name would be a trap for both.
+PARTS_SUFFIX = "-parts.json"
 
 
 def placements_path(dist, name):
     return os.path.join(dist, name + PLACEMENTS_SUFFIX)
+
+
+def parts_path(dist, name):
+    return os.path.join(dist, name + PARTS_SUFFIX)
 
 
 @dataclass

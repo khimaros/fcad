@@ -35,11 +35,17 @@ from fcad.freecad import build_assembly, fem
 # euler-bernoulli theory holds to well under the tolerance -- shear adds ~0.4%.
 BEAM = (300.0, 30.0, 20.0)          # length, width, height (mm)
 STEEL = {"E": 210000.0, "nu": 0.30, "rho": 7900.0}
-BEAM_MESH = 10.0                    # coarse on purpose: 2nd-order tets earn it
+# gmsh reseeds between runs - the same solve here meshed to 365 and to 373 nodes
+# on consecutive calls - so a tolerance is only meaningful against the *spread*,
+# not against one draw. sampled 12x per size: mesh_size 10 wanders to 4.8% error
+# against this 5% tolerance (and a suite run caught a 19% draw), while 6 holds
+# 0.4% for the sake of ~1000 nodes instead of ~370. cheap, and not flaky.
+BEAM_MESH = 6.0
 BEAM_TOL = 0.05
 TOP_PRESSURE = 0.1                  # MPa, uniformly on the top face
 TIP_FORCE = 500.0                   # N, -z on the +x end face
 HOLE_R = 2.0                        # a 4mm pilot, the feature `undrilled` drops
+FINER = 0.6                         # mesh_size multiplier for the convergence check
 
 
 class _Spec:
@@ -181,6 +187,72 @@ def _cantilever_checks():
     ]
 
 
+def _determinism_checks():
+    """R6.1: the same design meshes to the same mesh twice.
+
+    gmsh's parallel 3d algorithm is not reproducible - identical runs returned
+    365 and 373 nodes here, and 358429 to 359442 on a finer one - and
+    `Mesh.RandomSeed` does not fix it, because the variation is thread
+    interleaving rather than the seed. FreeCAD sets `General.NumThreads` to the
+    cpu count, so every solve inherited it. that reseeding is what lets an
+    unchanged model report a peak 350x different from the last run, and it made
+    this file's own 5% theory check draw a 19% error. equality is the assertion,
+    deliberately: a tolerance would just be the flakiness written down.
+
+    the solver was the other half, and the worse one. CalculiX at 16 threads
+    returned four different tip deflections in ten runs of one *fixed* .inp,
+    spanning 6.5%, with the low ones 6.4% under the closed form the
+    single-threaded run matched to 0.25% - so it was not merely unrepeatable, it
+    was intermittently wrong, and this file's own theory check failed on it. one
+    thread, one answer. both halves pinned, a result is reproducible end to end,
+    which is what lets this assert equality rather than a tolerance."""
+    beam = lambda: Part.makeBox(*BEAM)
+    load = lambda: SimpleNamespace(kind="force", faces=[fs.max_along("x")],
+                                   magnitude=TIP_FORCE, direction="-z")
+    runs = [_solve(_Project(_beam_case(load()), beam)) for _ in range(2)]
+    counts = [len(r["nodes"]) for r in runs]
+    tips = [_tip(r)[0] for r in runs]
+    peaks = [float(r["von_mises"].max()) for r in runs]
+    return [
+        ("a re-mesh gives the same node count (%d, %d)" % tuple(counts),
+         counts[0] == counts[1]),
+        ("and the same node positions",
+         bool((runs[0]["nodes"] == runs[1]["nodes"]).all())),
+        ("a re-solve gives the same deflection (%.6f, %.6f mm)" % tuple(tips),
+         tips[0] == tips[1]),
+        ("and the same peak stress (%.4f, %.4f MPa)" % tuple(peaks),
+         peaks[0] == peaks[1]),
+    ]
+
+
+def _convergence_checks():
+    """R6.1: refining the mesh moves the deflection hardly at all.
+
+    which is the whole case for reading a result off `disp` and `von_mises_p95`
+    rather than off the peak. the peak is a sample of the mesh: an unchanged
+    planter board re-solved on a fresh seed reported 6.2 MPa and then 2191.1, a
+    factor of 350, with its deflection stable to four figures. a seed cannot be
+    varied deterministically enough to assert on, but refinement can, and it
+    exercises the same property - so the peak is deliberately left unasserted
+    here, because pinning a singular value is exactly the mistake."""
+    beam = lambda: Part.makeBox(*BEAM)
+    load = lambda: SimpleNamespace(kind="pressure", faces=fs.max_along("z"),
+                                   magnitude=TOP_PRESSURE)
+    outs = []
+    for size in (BEAM_MESH, BEAM_MESH * FINER):
+        case = _beam_case(load())
+        case.mesh_size = size
+        outs.append(_solve(_Project(case, beam)))
+    coarse, fine = (_tip(o)[0] for o in outs)
+    p95 = [float(o["von_mises_p95"]) for o in outs]
+    return [
+        ("deflection is mesh-independent: %.4f vs %.4f mm at %gx the elements"
+         % (coarse, fine, FINER ** -3), abs(fine - coarse) <= 0.02 * coarse),
+        ("p95 is nearly so: %.2f vs %.2f MPa" % tuple(p95),
+         abs(p95[1] - p95[0]) <= 0.35 * p95[0]),
+    ]
+
+
 def _held(**held):
     """the beam under the same uniform pressure, held however the case says."""
     return SimpleNamespace(
@@ -290,7 +362,8 @@ def _percentile_checks(out):
 def main():
     box = _solve(_Project(_box_case()))
     checks = (_selector_checks() + _solve_checks(box) + _cantilever_checks()
-              + _percentile_checks(box) + _support_checks()
+              + _percentile_checks(box) + _determinism_checks()
+              + _convergence_checks() + _support_checks()
               + _undrilled_checks() + _mesh_limit_checks())
     failed = [name for name, ok in checks if not ok]
     lines = ["%s %s" % ("ok  " if ok else "FAIL", name) for name, ok in checks]

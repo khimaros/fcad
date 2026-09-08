@@ -277,6 +277,9 @@ def build(project, values, dirs, formats):
     fcutil.export_placements(
         {spec.name: spec.placements for spec in specs},
         fcutil.placements_path(dirs["dist"], project.name))
+    # and the two per-part flags no renderer can infer from geometry: the anchor,
+    # and which parts are fasteners. the assembly animator sequences on both.
+    fcutil.export_parts(specs, fcutil.parts_path(dirs["dist"], project.name))
 
     if "bom" in formats:
         write_bom(specs, os.path.join(dirs["dist"], project.name + "-bom.csv"))

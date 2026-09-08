@@ -15,7 +15,7 @@ import FreeCAD as App
 import Part
 import Mesh
 
-from fcad.config import placements_path  # noqa: F401  (re-exported for callers)
+from fcad.config import parts_path, placements_path  # noqa: F401  (re-exported)
 
 # our own A4 landscape template: a border plus a fillable title block. the
 # bundled default is blank (no border, no block), so we ship one as package data.
@@ -156,6 +156,21 @@ def export_placements(placements, path):
     other neutral exports and the diff reads both sides back."""
     data = {name: [[[p.Base.x, p.Base.y, p.Base.z], list(p.Rotation.Q)] for p in pls]
             for name, pls in placements.items()}
+    with open(path, "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+
+
+def export_parts(specs, path):
+    """write {part name: {grounded, embeds}} as json.
+
+    the two flags a renderer cannot recover from geometry: which part anchors the
+    model, and which parts are fasteners rather than structure. the assembly
+    animator needs both to arrive in a sensible order - build outward from the
+    anchor, drive the screws last - and it runs under plain python with no access
+    to the project that declared them."""
+    data = {spec.name: {"grounded": bool(getattr(spec, "grounded", False)),
+                        "embeds": bool(getattr(spec, "embeds", False))}
+            for spec in specs}
     with open(path, "w") as f:
         json.dump(data, f, indent=1, sort_keys=True)
 

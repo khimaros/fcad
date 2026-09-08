@@ -6,6 +6,7 @@ runs under plain python (no FreeCAD), so the model name + dist dir are passed in
 (the cli supplies them; they default from the environment for standalone use).
 """
 
+import math
 import os
 import sys
 
@@ -17,6 +18,37 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 WOOD = (0.82, 0.71, 0.55)
+# the camera, shared by every renderer and animator, because it used to be three
+# private copies and FCAD_ELEV meant two different things depending on which
+# command read it - a fixed elevation here, the centre of a sweep in animate.py.
+# it now means one thing: the elevation of a still and the centre of a sweep,
+# with FCAD_AZIM the still's (or the orbit's starting) azimuth and FCAD_TILT the
+# sweep amplitude. TILT=0 holds the elevation, which makes a fixed camera a
+# special case of an orbit rather than a second code path.
+ELEV = float(os.environ.get("FCAD_ELEV", 22))
+AZIM = float(os.environ.get("FCAD_AZIM", -58))
+TILT = float(os.environ.get("FCAD_TILT", 62))
+
+
+def aim(ax, frac=None, camera="orbit"):
+    """point the camera: a still viewpoint, or one frame of a moving one.
+
+    `frac` is the position in the loop, 0..1, or None for a still. the three
+    cameras differ only in how much of that they use - `fixed` none of it,
+    `turntable` the azimuth, `orbit` the azimuth and an elevation sweep - so this
+    is one expression at two amplitudes rather than three code paths, and every
+    motion completes exactly once per loop, leaving the gif without a seam.
+
+    a turntable is the level spin a product shot wants, and keeps a part's
+    proportions readable because the eye is never above or below it. an orbit
+    additionally rises and dives, which is what brings the top and the underside
+    into view - and a loaded structure is supported from underneath, so the
+    underside is usually where the answer is."""
+    if frac is None or camera == "fixed":
+        return ax.view_init(elev=ELEV, azim=AZIM)
+    tilt = TILT if camera == "orbit" else 0.0
+    ax.view_init(elev=ELEV + tilt * math.sin(2.0 * math.pi * frac),
+                 azim=AZIM + 360.0 * frac)
 
 
 def _resolve(name, dist):
@@ -79,8 +111,7 @@ def render(target="assembly", out=None, name=None, dist=None):
     tris = load_tris(target, name, dist)
     fig = plt.figure(figsize=(10, 8))
     ax = make_axes(fig, tris)
-    ax.view_init(elev=float(os.environ.get("FCAD_ELEV", 22)),
-                 azim=float(os.environ.get("FCAD_AZIM", -58)))
+    aim(ax)
     ax.set_title("%s  (%d triangles)" % (target, len(tris)))
 
     out = out or os.path.join(dist, "render_%s.png" % target)

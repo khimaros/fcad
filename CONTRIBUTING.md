@@ -280,6 +280,22 @@ for the script name.
   front - 2.29 GiB of VmData against 0.03 GiB resident on the smallest solve,
   constant, and unaffected by thread count - so a ceiling under ~3 GiB stops
   FreeCAD starting at all rather than stopping anything from running away.
+  (7) **neither tool is reproducible at its default thread count, and one of them
+  is wrong.** gmsh's parallel 3d algorithm reseeds - four identical runs of a
+  358k-node mesh gave four node counts, and `Mesh.RandomSeed` does not help
+  because the variation is thread interleaving - and FreeCAD sets
+  `General.NumThreads` to the cpu count. worse, ten CalculiX runs of a single
+  *byte-identical* `.inp` at 16 threads returned four different tip deflections
+  spanning 6.5%, the low ones 6.4% under a closed form the 1-thread run matched
+  to 0.25%. so pin both: `NumOfThreads` in the Gmsh preference group (and restore
+  it afterwards - it is the user's, and a gui left meshing single-threaded
+  because a build ran is not fcad's call), and `OMP_NUM_THREADS` by running ccx
+  yourself, because `start_ccx` forces it to the cpu count and `AnalysisNumCPUs`
+  only ever *raises* it - setting that preference to 1 selects the cpu-count
+  branch. costs ~15% of the mesh step and 1.2-1.6x of the solve. anything
+  comparing FEM numbers between runs is otherwise comparing noise, and this bit
+  `tests/test_fem.py`'s own beam-theory check intermittently for a long time
+  before it was tracked down.
 - **gui-only:** `obj.ViewObject` (colors), Draft layers, anything in
   `*Gui` modules. guard with `if App.GuiUp:`. `freecadcmd` is headless.
 - disable `.FCBak` clutter: set `Preferences/Document/CountBackupFiles = 0`.

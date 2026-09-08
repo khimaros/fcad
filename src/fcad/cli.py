@@ -15,6 +15,9 @@ import sys
 
 from fcad import __version__, config, cutlist
 from fcad._run import run_entry
+# the animation vocabulary only; fcad.render is import-free at package level, so
+# naming these in --help costs nothing (importing the renderers pulls matplotlib).
+from fcad.render import CAMERAS, MESH_SUBJECTS, ORDERS, SUBJECTS
 
 # headless build/validate commands handled by freecad/_entry's dispatch path.
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
@@ -73,11 +76,28 @@ def _build_parser():
     v.add_argument("--part", metavar="NAME", help="with 'parts': open only this part")
 
     r = sub.add_parser("render", help="offscreen png of a built stl")
-    r.add_argument("target", nargs="?", default="assembly")
-    r.add_argument("out", nargs="?")
+    r.add_argument("target", nargs="?", default="assembly",
+                   help="part name or 'assembly' (default)")
+    r.add_argument("out", nargs="?", metavar="PNG",
+                   help="output file (default <dist>/<target>.png)")
     a = sub.add_parser("animate", help="turntable mp4 + gif of a built stl")
-    a.add_argument("target", nargs="?", default="assembly")
-    a.add_argument("stem", nargs="?")
+    a.add_argument("target", nargs="?", default="assembly",
+                   help="part name or 'assembly' (default)")
+    a.add_argument("stem", nargs="?", metavar="STEM",
+                   help="output path stem, .mp4/.gif appended "
+                        "(default <dist>/spin_<target>)")
+    a.add_argument("--camera", choices=CAMERAS, default="orbit",
+                   help="orbit every side incl. the underside (default), spin "
+                        "level, or hold FCAD_ELEV/FCAD_AZIM")
+    a.add_argument("--subject", choices=MESH_SUBJECTS,
+                   help="'assemble' flies the parts in one by one, 'static' "
+                        "holds the model whole. default: assemble for the "
+                        "assembly, static for a single part, which has nothing "
+                        "to assemble")
+    a.add_argument("--order", choices=ORDERS, default="grounded",
+                   help="with 'assemble': the sequence parts arrive in "
+                        "(default outward from the part flagged `grounded` over "
+                        "what touches what, fasteners last)")
 
     f = sub.add_parser("fem", help="solve FEM (von Mises + displacement; headless)")
     f.add_argument("target", nargs="?", default="assembly",
@@ -86,12 +106,24 @@ def _build_parser():
     f.add_argument("--modes", type=int, metavar="K",
                    help="eigenmode count (implies --modal)")
     fr = sub.add_parser("fem-render", help="png of a solved FEM result")
-    fr.add_argument("target", nargs="?", default="assembly")
-    fr.add_argument("out", nargs="?")
+    fr.add_argument("target", nargs="?", default="assembly",
+                    help="part name or 'assembly' (default)")
+    fr.add_argument("out", nargs="?", metavar="PNG",
+                    help="output file (default <dist>/fem_<target>.png)")
     fa = sub.add_parser("fem-animate",
                         help="deformation + modal mp4/gif of a FEM result")
-    fa.add_argument("target", nargs="?", default="assembly")
-    fa.add_argument("stem", nargs="?")
+    fa.add_argument("target", nargs="?", default="assembly",
+                    help="part name or 'assembly' (default)")
+    fa.add_argument("stem", nargs="?", metavar="STEM",
+                    help="output path stem, .mp4/.gif appended "
+                         "(default <dist>/fem_<target>)")
+    fa.add_argument("--camera", choices=CAMERAS, default="orbit",
+                    help="orbit every side incl. the underside (default), spin "
+                        "level, or hold FCAD_ELEV/FCAD_AZIM")
+    fa.add_argument("--subject", choices=SUBJECTS, default="all",
+                    help="what moves: flex + one clip per mode (default), just "
+                         "the flex, just the modes, or 'static' to hold peak "
+                         "deflection and let the camera do the work")
 
     for name, help_ in (("diff", "3d diff vs git HEAD (compute, then open)"),
                         ("diff-build", "compute + save the diff headless (slow part)"),
@@ -272,7 +304,12 @@ def main(argv=None):
         return 0
     if cmd == "animate":
         from fcad.render import animate
-        animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist)
+        # the assembly is the thing worth watching build itself; a single part
+        # has nothing to assemble, so it spins instead.
+        subject = args.subject or ("assemble" if args.target in
+                                   ("assembly", cfg.name) else "static")
+        animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist,
+                        camera=args.camera, subject=subject, order=args.order)
         return 0
     if cmd == "fem":
         env = {"FCAD_TARGET": args.target}
@@ -287,7 +324,8 @@ def main(argv=None):
         return 0
     if cmd == "fem-animate":
         from fcad.render import fem_animate
-        fem_animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist)
+        fem_animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist,
+                            camera=args.camera, subject=args.subject)
         return 0
     if cmd in ("diff", "diff-build", "diff-open"):
         from fcad import diff
