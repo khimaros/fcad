@@ -114,19 +114,74 @@ def _robustness_checks():
     ]
 
 
+def _in_flight(count, at_once, steps=200):
+    """the most parts simultaneously in the air over a whole clip."""
+    worst = 0
+    for s in range(steps + 1):
+        frac = s / float(steps)
+        moving = sum(1 for i in range(count)
+                     if 0.0 < assemble.arrival(frac, i, count, at_once) < 1.0)
+        worst = max(worst, moving)
+    return worst
+
+
 def _timing_checks():
     """arrival is a smoothstep over each part's slice of the clip."""
     a = [assemble.arrival(f / 20.0, 0, 4) for f in range(21)]
     last = [assemble.arrival(f / 20.0, 3, 4) for f in range(21)]
+    half = 0.5 * assemble.flight_for(4)
     return [
         ("a part starts away from home", a[0] == 0.0),
         ("and ends at home", a[-1] == 1.0),
         ("arriving monotonically", all(x <= y for x, y in zip(a, a[1:]))),
         ("easing in and out rather than at constant speed",
-         assemble.arrival(0.5 * assemble.FLIGHT, 0, 4) == 0.5
-         and a[1] < 0.5 * a[10]),
+         assemble.arrival(half, 0, 4) == 0.5 and a[1] < 0.5 * a[10]),
         ("the last part is home before the clip ends, so the model is seen",
          last[-1] == 1.0),
+    ]
+
+
+def _concurrency_checks():
+    """R4.3: FCAD_AT_ONCE caps how many parts are in the air together.
+
+    a fixed flight duration does not survive the part count - twenty parts at
+    0.45 of the clip each converge twenty-deep, which reads as an explosion
+    running backwards. capping the concurrency and solving the flight from it
+    holds the picture steady however many parts there are."""
+    counts = (2, 5, 20)
+    caps = [(n, c, _in_flight(c, n)) for n in (1, 2, 4) for c in counts]
+    seq = all(m == 1 for n, _, m in caps if n == 1)
+    honoured = all(m <= n for n, _, m in caps)
+    # and it is not trivially satisfied by never overlapping at all.
+    reaches = _in_flight(20, 4) == 4
+    ends = [assemble.arrival(1.0, c - 1, c, n) for n in (1, 4) for c in counts]
+    return [
+        ("at_once=1 is strictly sequential, one part landing before the next "
+         "leaves", seq),
+        ("a cap of N never exceeds N in flight %s"
+         % [(n, c, m) for n, c, m in caps], honoured),
+        ("and is actually reached, not just never approached", reaches),
+        ("every part still lands by the end, at any concurrency",
+         all(v == 1.0 for v in ends)),
+    ]
+
+
+def _length_checks():
+    """R4.3: --seconds/--fps set the clip; the frame count is their product.
+
+    arrival works in fractions of the loop, so lengthening a clip changes its
+    pace and nothing else - the concurrency and the ordering are untouched."""
+    from fcad.render import MESH_SECONDS, render
+    return [
+        ("frames are seconds x fps", render.frames_for(6, 12) == 72),
+        ("a longer clip is proportionally more frames",
+         render.frames_for(12, 12) == 2 * render.frames_for(6, 12)),
+        ("a higher rate is proportionally more frames",
+         render.frames_for(6, 24) == 2 * render.frames_for(6, 12)),
+        ("a degenerate request still writes something playable",
+         render.frames_for(0, 12) == 2 and render.frames_for(-5, 12) == 2),
+        ("the default length is shared with the cli, not duplicated",
+         render.frames_for(MESH_SECONDS, 10) == 72),
     ]
 
 
@@ -196,6 +251,7 @@ def main():
     root = tempfile.mkdtemp()
     try:
         checks = (_order_checks() + _robustness_checks() + _timing_checks()
+                  + _concurrency_checks() + _length_checks()
                   + _render_checks(root))
     finally:
         shutil.rmtree(root, ignore_errors=True)

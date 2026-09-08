@@ -30,6 +30,17 @@ AZIM = float(os.environ.get("FCAD_AZIM", -58))
 TILT = float(os.environ.get("FCAD_TILT", 62))
 
 
+def frames_for(seconds, fps):
+    """how many frames a clip of `seconds` at `fps` needs.
+
+    length and frame rate are what a caller thinks in; the frame count is their
+    product rather than a third setting, which is why there is no frame knob -
+    of the three only two are independent, and the one nobody wants to specify
+    is the count. at least two frames, so that even a degenerate request writes
+    a playable file instead of an empty one."""
+    return max(2, int(round(float(seconds) * int(fps))))
+
+
 def aim(ax, frac=None, camera="orbit"):
     """point the camera: a still viewpoint, or one frame of a moving one.
 

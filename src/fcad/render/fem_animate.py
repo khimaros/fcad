@@ -14,7 +14,7 @@ written as mp4 + gif like animate.py, over two orthogonal axes:
 
 reads the FreeCAD/VTK-free .npz from `fcad fem`. every motion completes a whole
 number of cycles per loop, so the gif/mp4 loop without a visible seam.
-  env: FCAD_FRAMES (default 48), FCAD_FPS (12), FCAD_DPI (90),
+  env: FCAD_SECONDS (clip length, default 4.0), FCAD_FPS (12), FCAD_DPI (90),
        FCAD_FEM_DEFORM (peak deflection as a fraction of model size, 0.08),
        FCAD_FEM_CYCLES (flex cycles per orbit, 4),
        FCAD_ELEV/FCAD_AZIM/FCAD_TILT (the camera, as for every other renderer),
@@ -38,9 +38,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 
-from fcad.render import render, fem_render
+from fcad.render import FEM_SECONDS, render, fem_render
 
-FRAMES = int(os.environ.get("FCAD_FRAMES", 48))
+SECONDS = float(os.environ.get("FCAD_SECONDS", FEM_SECONDS))
 FPS = int(os.environ.get("FCAD_FPS", 12))
 DPI = int(os.environ.get("FCAD_DPI", 90))
 # flex cycles per orbit. not 1 on purpose: with a single cycle per turn every
@@ -49,15 +49,15 @@ DPI = int(os.environ.get("FCAD_DPI", 90))
 CYCLES = int(os.environ.get("FCAD_FEM_CYCLES", 4))
 
 
-def _save(anim, stem):
+def _save(anim, stem, fps):
     mp4, gif = stem + ".mp4", stem + ".gif"
-    anim.save(mp4, writer=FFMpegWriter(fps=FPS), dpi=DPI)
-    anim.save(gif, writer=PillowWriter(fps=FPS), dpi=DPI)
+    anim.save(mp4, writer=FFMpegWriter(fps=fps), dpi=DPI)
+    anim.save(gif, writer=PillowWriter(fps=fps), dpi=DPI)
     return mp4, gif
 
 
 def _clip(nodes, tris, field, mode_disp, peak_scale, title, stem, label,
-          vmax=None, camera="orbit", cycles=CYCLES):
+          vmax=None, camera="orbit", cycles=CYCLES, frames=48, fps=FPS):
     """write one clip: the subject flexing, the camera orbiting, or both.
 
     `cycles=0` holds the subject at peak deflection instead of flexing it, which
@@ -74,22 +74,25 @@ def _clip(nodes, tris, field, mode_disp, peak_scale, title, stem, label,
     ax.set_title(title)
 
     def update(i):
-        f = i / FRAMES
+        f = i / frames
         if cycles:
             s = peak_scale * math.sin(2.0 * math.pi * cycles * f)
             coll.set_verts((nodes + s * mode_disp)[tris])
         render.aim(ax, f, camera)
         return ()
 
-    anim = FuncAnimation(fig, update, frames=FRAMES, interval=1000.0 / FPS)
-    mp4, gif = _save(anim, stem)
+    anim = FuncAnimation(fig, update, frames=frames, interval=1000.0 / fps)
+    mp4, gif = _save(anim, stem, fps)
     plt.close(fig)
     return mp4, gif
 
 
 def animate(target="assembly", stem=None, name=None, dist=None,
-            camera="orbit", subject="all"):
+            camera="orbit", subject="all", seconds=None, fps=None):
     name, dist = render._resolve(name, dist)
+    fps = max(1, int(fps or FPS))
+    frames = render.frames_for(seconds or SECONDS, fps)
+    clip = lambda *a, **kw: _clip(*a, frames=frames, fps=fps, **kw)
     data = np.load(fem_render.npz_path(target, name, dist))
     nodes, tris = data["nodes"], data["tris"]
     stem = stem or os.path.join(dist, "fem_%s" % target)
@@ -103,10 +106,10 @@ def animate(target="assembly", stem=None, name=None, dist=None,
         cycles = 0 if subject == "static" else CYCLES
         vmax, note = fem_render.stress_scale(data, data["von_mises"])
         motion = "held" if not cycles else "flex"
-        written.append(_clip(nodes, tris, data["von_mises"], data["disp"], scale,
-                             "%s  %s (x%.0f)  %s" % (target, motion, scale, note),
-                             stem, "von Mises (MPa)", vmax=vmax, camera=camera,
-                             cycles=cycles))
+        written.append(clip(nodes, tris, data["von_mises"], data["disp"], scale,
+                            "%s  %s (x%.0f)  %s" % (target, motion, scale, note),
+                            stem, "von Mises (MPa)", vmax=vmax, camera=camera,
+                            cycles=cycles))
 
     # one clip per eigenmode, colored by mode-shape magnitude. a held mode shape
     # is meaningless (a mode *is* the oscillation), so these always flex.
@@ -117,11 +120,11 @@ def animate(target="assembly", stem=None, name=None, dist=None,
             mag = np.linalg.norm(md, axis=1).astype(np.float32)
             peak = float(mag.max()) or 1.0
             amp = fem_render.DEFORM_FRAC * bbox / peak
-            written.append(_clip(nodes, tris, mag, md, amp,
-                                 "%s  mode %d: %.1f Hz" %
-                                 (target, k + 1, float(data["mode_freqs"][k])),
-                                 "%s_mode%d" % (stem, k + 1), "mode disp (mm)",
-                                 camera=camera))
+            written.append(clip(nodes, tris, mag, md, amp,
+                                "%s  mode %d: %.1f Hz" %
+                                (target, k + 1, float(data["mode_freqs"][k])),
+                                "%s_mode%d" % (stem, k + 1), "mode disp (mm)",
+                                camera=camera))
 
     if not written:
         raise SystemExit("fcad fem-animate: subject %r produced no clips "

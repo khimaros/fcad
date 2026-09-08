@@ -23,11 +23,12 @@ fem_animate: `orbit` spins a full turn while the elevation sweeps one cycle so
 every side including top and underside comes into view, `turntable` spins level,
 and `fixed` holds FCAD_ELEV/FCAD_AZIM. an stl has nothing to animate, so this is
 the camera half of the same vocabulary fem-animate uses for both halves.
-  env: FCAD_FRAMES (default 72), FCAD_FPS (10), FCAD_DPI (90),
+  env: FCAD_SECONDS (clip length, default 7.2), FCAD_FPS (10), FCAD_DPI (90),
        FCAD_ELEV/FCAD_AZIM (viewpoint, or an orbit's centre/start),
        FCAD_TILT (elevation sweep amplitude, 62; 0 = no sweep),
        FCAD_CLUSTER (grid mm, default 4; 0 disables),
-       FCAD_EXPLODE/FCAD_FLIGHT/FCAD_SETTLE (the assemble timing, see assemble.py)
+       FCAD_AT_ONCE (parts in the air at once while assembling, default 3),
+       FCAD_EXPLODE/FCAD_SETTLE/FCAD_CONTACT (see assemble.py)
 """
 
 import os
@@ -39,9 +40,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 
-from fcad.render import assemble, render
+from fcad.render import MESH_SECONDS, assemble, render
 
-FRAMES = int(os.environ.get("FCAD_FRAMES", 72))
+SECONDS = float(os.environ.get("FCAD_SECONDS", MESH_SECONDS))
 FPS = int(os.environ.get("FCAD_FPS", 10))
 DPI = int(os.environ.get("FCAD_DPI", 90))
 CLUSTER = float(os.environ.get("FCAD_CLUSTER", 4.0))
@@ -94,8 +95,10 @@ def _assemble(fig, target, name, dist, how):
 
 
 def animate(target="assembly", stem=None, name=None, dist=None, camera="orbit",
-            subject="assemble", order="grounded"):
+            subject="assemble", order="grounded", seconds=None, fps=None):
     name, dist = render._resolve(name, dist)
+    fps = max(1, int(fps or FPS))
+    frames = render.frames_for(seconds or SECONDS, fps)
     fig = plt.figure(figsize=(8, 8))
     if subject == "assemble":
         ax, pose = _assemble(fig, target, name, dist, order)
@@ -104,18 +107,19 @@ def animate(target="assembly", stem=None, name=None, dist=None, camera="orbit",
     render.aim(ax)
 
     def update(i):
-        frac = i / FRAMES
+        frac = i / frames
         pose(frac)
         render.aim(ax, frac, camera)
         return ()
 
-    anim = FuncAnimation(fig, update, frames=FRAMES, interval=1000.0 / FPS)
+    anim = FuncAnimation(fig, update, frames=frames, interval=1000.0 / fps)
     stem = stem or os.path.join(
         dist, ("assemble_%s" if subject == "assemble" else "spin_%s") % target)
     mp4, gif = stem + ".mp4", stem + ".gif"
-    anim.save(mp4, writer=FFMpegWriter(fps=FPS), dpi=DPI)
-    anim.save(gif, writer=PillowWriter(fps=FPS), dpi=DPI)
-    print("animated %s -> %s, %s" % (target, mp4, gif))
+    anim.save(mp4, writer=FFMpegWriter(fps=fps), dpi=DPI)
+    anim.save(gif, writer=PillowWriter(fps=fps), dpi=DPI)
+    print("animated %s -> %s, %s (%.1fs at %d fps)"
+          % (target, mp4, gif, frames / float(fps), fps))
 
 
 if __name__ == "__main__":

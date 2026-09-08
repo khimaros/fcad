@@ -17,7 +17,8 @@ from fcad import __version__, config, cutlist
 from fcad._run import run_entry
 # the animation vocabulary only; fcad.render is import-free at package level, so
 # naming these in --help costs nothing (importing the renderers pulls matplotlib).
-from fcad.render import CAMERAS, MESH_SUBJECTS, ORDERS, SUBJECTS
+from fcad.render import (CAMERAS, FEM_SECONDS, MESH_SECONDS, MESH_SUBJECTS,
+                         ORDERS, SUBJECTS)
 
 # headless build/validate commands handled by freecad/_entry's dispatch path.
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
@@ -94,6 +95,11 @@ def _build_parser():
                         "holds the model whole. default: assemble for the "
                         "assembly, static for a single part, which has nothing "
                         "to assemble")
+    a.add_argument("--seconds", type=float, metavar="N",
+                   help="clip length (default %g)" % MESH_SECONDS)
+    a.add_argument("--fps", type=int, metavar="N",
+                   help="frames per second; raise for smoother, lower for a "
+                        "smaller file (default 10)")
     a.add_argument("--order", choices=ORDERS, default="grounded",
                    help="with 'assemble': the sequence parts arrive in "
                         "(default outward from the part flagged `grounded` over "
@@ -120,6 +126,11 @@ def _build_parser():
     fa.add_argument("--camera", choices=CAMERAS, default="orbit",
                     help="orbit every side incl. the underside (default), spin "
                         "level, or hold FCAD_ELEV/FCAD_AZIM")
+    fa.add_argument("--seconds", type=float, metavar="N",
+                    help="length of each clip (default %g)" % FEM_SECONDS)
+    fa.add_argument("--fps", type=int, metavar="N",
+                    help="frames per second; raise for smoother, lower for a "
+                         "smaller file (default 12)")
     fa.add_argument("--subject", choices=SUBJECTS, default="all",
                     help="what moves: flex + one clip per mode (default), just "
                          "the flex, just the modes, or 'static' to hold peak "
@@ -309,7 +320,8 @@ def main(argv=None):
         subject = args.subject or ("assemble" if args.target in
                                    ("assembly", cfg.name) else "static")
         animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist,
-                        camera=args.camera, subject=subject, order=args.order)
+                        camera=args.camera, subject=subject, order=args.order,
+                        seconds=args.seconds, fps=args.fps)
         return 0
     if cmd == "fem":
         env = {"FCAD_TARGET": args.target}
@@ -325,7 +337,8 @@ def main(argv=None):
     if cmd == "fem-animate":
         from fcad.render import fem_animate
         fem_animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist,
-                            camera=args.camera, subject=args.subject)
+                            camera=args.camera, subject=args.subject,
+                            seconds=args.seconds, fps=args.fps)
         return 0
     if cmd in ("diff", "diff-build", "diff-open"):
         from fcad import diff

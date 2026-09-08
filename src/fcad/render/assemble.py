@@ -40,10 +40,14 @@ from fcad.render import render
 # usable - the cube is squared to the *assembled* model, so parts fly in from
 # outside the frame and that is fine.
 EXPLODE = float(os.environ.get("FCAD_EXPLODE", 1.6))
-# fraction of the clip one part spends flying in. parts overlap in flight when
-# this exceeds the per-part slice, which keeps a many-part assembly from becoming
-# a slideshow of one twitch per part.
-FLIGHT = float(os.environ.get("FCAD_FLIGHT", 0.45))
+# how many parts may be in the air at once, which is the thing that actually
+# reads. a fixed flight duration does not survive the part count: at 0.45 of the
+# clip each, three parts overlap two-deep and twenty overlap twenty-deep, so a
+# real assembly arrived as one converging swarm - an explosion running backwards
+# rather than something being built. fixing the concurrency instead and deriving
+# the flight from it holds the picture steady from three parts to fifty. 1 is
+# strictly sequential: each part lands before the next leaves.
+AT_ONCE = max(1, int(os.environ.get("FCAD_AT_ONCE", 3)))
 # a beat at the end with everything in place, so the finished model is actually
 # looked at rather than glimpsed on the last frame.
 SETTLE = float(os.environ.get("FCAD_SETTLE", 0.12))
@@ -200,19 +204,28 @@ def offsets(parts):
     return out
 
 
-def arrival(frac, index, count):
+def flight_for(count, at_once=AT_ONCE):
+    """the fraction of the clip one part spends in the air.
+
+    solved from the concurrency rather than fixed: `at_once` flights of this
+    length, spaced evenly, exactly fill the clip up to its settling beat."""
+    usable = max(1e-6, 1.0 - SETTLE)
+    n = max(1, int(at_once))
+    return usable if count <= 1 else usable * n / float(count - 1 + n)
+
+
+def arrival(frac, index, count, at_once=AT_ONCE):
     """0 (not yet placed) .. 1 (home) for one part at loop position `frac`.
 
     departures are spread so that the *last* flight lands on the settling beat -
-    over `usable - FLIGHT`, not over `usable`, which would leave the final part
-    still in the air when the clip ends and the model never seen whole. each
-    flight lasting FLIGHT of the whole means they overlap, so a twenty-part
-    assembly moves continuously instead of twitching once per part. the ease is a
-    smoothstep: it leaves and arrives at rest, which is what stops each landing
-    looking like a collision."""
+    over `usable - flight`, not over `usable`, which would leave the final part
+    still in the air when the clip ends and the model never seen whole. the ease
+    is a smoothstep: it leaves and arrives at rest, which is what stops each
+    landing looking like a collision."""
     usable = max(1e-6, 1.0 - SETTLE)
-    span = max(0.0, usable - FLIGHT)
+    flight = flight_for(count, at_once)
+    span = max(0.0, usable - flight)
     start = span * index / (count - 1) if count > 1 else 0.0
-    t = (frac - start) / max(1e-6, FLIGHT)
+    t = (frac - start) / max(1e-6, flight)
     t = min(1.0, max(0.0, t))
     return t * t * (3.0 - 2.0 * t)

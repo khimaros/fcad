@@ -47,6 +47,13 @@
   `<name>-parts.json` rather than as extra keys in the placements file, whose
   shape is `{part: [placement]}` and whose readers would be tripped by a
   top-level key that is not a part name.
+
+  timing is `--seconds` and `--fps` on both animators, with the frame count their
+  product rather than a third setting - of the three, only two are independent,
+  and the one nobody wants to specify is the count. `FCAD_AT_ONCE` caps how many
+  parts fly at once (1 being strictly sequential), which is a concurrency rather
+  than a flight duration because a duration does not survive the part count: one
+  that looks right for three parts has twenty converging twenty-deep.
 - **the animators now agree: a camera crossed with a subject.** `animate` moved
   the camera and not the model; `fem-animate` moved the model and not the camera.
   each had exactly what the other lacked, which was accidental rather than
