@@ -13,8 +13,11 @@ the result is written two ways: `<target>.fem.FCStd` (the analysis document) and
 von Mises, displacement and mode shapes) that the plain-python renderer consumes.
 """
 
+import contextlib
 import os
+import shutil
 import subprocess
+import tempfile
 
 import numpy as np
 import FreeCAD as App
@@ -83,6 +86,7 @@ MESH_THREADS = 1
 # mesher and for write_inp/load_results.
 CCX_THREADS_ENV = "FCAD_FEM_THREADS"
 CCX_THREADS = 1
+KEEP_WORK_ENV = "FCAD_KEEP_WORK"
 
 
 def _get(case, attr, default=None):
@@ -304,7 +308,7 @@ def _too_big(target, mesh, nodes, need, have):
                limits.human(need)))
 
 
-def _mesh(target, mesh):
+def _mesh(target, mesh, work=None):
     """mesh with gmsh, reproducibly and under a wall clock bound.
 
     the thread count is a preference, so it is set for the duration of this mesh
@@ -318,7 +322,7 @@ def _mesh(target, mesh):
     if threads > 0:
         prefs.SetInt(THREADS_PREF, threads)
     try:
-        return _gmsh(target, mesh)
+        return _gmsh(target, mesh, work)
     finally:
         if prior is None:
             prefs.RemInt(THREADS_PREF)
@@ -326,7 +330,7 @@ def _mesh(target, mesh):
             prefs.SetInt(THREADS_PREF, prior)
 
 
-def _gmsh(target, mesh):
+def _gmsh(target, mesh, work=None):
     """run the mesher and read the result back; return the node count.
 
     FreeCAD's create_mesh() waits forever - waitForFinished(-1) - and reports a
@@ -338,7 +342,14 @@ def _gmsh(target, mesh):
     is ours to bound and to kill."""
     timeout = limits.mesh_timeout()
     tools = gmshtools.GmshTools(mesh)
-    tools.prepare()
+    # prepare() inlined so the working directory can be passed: its own call is
+    # `get_tmp_file_paths()` with no argument, which ignores the mesh object's
+    # WorkingDirectory and mkdtemps a fresh one that nothing ever removes.
+    tools.load_properties()
+    tools.update_mesh_data()
+    tools.get_tmp_file_paths(work, create=True)
+    tools.get_gmsh_command()
+    tools.write_gmsh_input_files()
     proc = tools.compute()
     if not proc.waitForFinished(int(timeout * 1000)):
         proc.kill()
@@ -456,12 +467,12 @@ def _ccx(fea):
                    capture_output=True)
 
 
-def _run(analysis, solver, target, mesh, directions=()):
+def _run(analysis, solver, target, mesh, directions=(), work=None):
     _reassert_directions(directions)
     fea = ccxtools.FemToolsCcx(analysis, solver)
     fea.purge_results()
     fea.update_objects()
-    fea.setup_working_dir()
+    fea.setup_working_dir(work, create=True)
     fea.write_inp_file()
     _ccx(fea)
     fea.load_results()
@@ -469,6 +480,27 @@ def _run(analysis, solver, target, mesh, directions=()):
     if not results:
         raise SystemExit(_no_result(target, solver, mesh))
     return results
+
+
+@contextlib.contextmanager
+def _workdir():
+    """own the scratch both tools write into, and take it away afterwards.
+
+    FreeCAD hands the mesher and the solver a fresh `mkdtemp` each and never
+    removes either, so every solve left two directories behind - the brep/geo/unv
+    of the mesh, and the inp/frd/dat of the solve. on linux /tmp is usually
+    tmpfs, which makes that not litter on a disk but resident memory held until
+    reboot: ~750 KB for a toy beam, and hundreds of MB for a real mesh, once per
+    solve, forever. FCAD_KEEP_WORK keeps them instead and says where, because the
+    .inp and .frd are exactly what you want when a solve misbehaves."""
+    path = tempfile.mkdtemp(prefix="fcad_fem_")
+    try:
+        yield path
+    finally:
+        if os.environ.get(KEEP_WORK_ENV):
+            print("fem work kept: " + path)
+        else:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def _undrilled(project, target):
@@ -484,6 +516,11 @@ def _undrilled(project, target):
 
 def solve(project, values, target, dist):
     """build, mesh and solve the FEM analysis for a target; return the npz dict."""
+    with _workdir() as work:
+        return _solve(project, values, target, dist, work)
+
+
+def _solve(project, values, target, dist, work):
     shape = build_assembly.target_shape(project, values, target,
                                         undrilled=_undrilled(project, target))
     if shape is None:
@@ -503,17 +540,21 @@ def solve(project, values, target, dist):
     directions = _constraints(doc, analysis, case, obj, infos)
     mesh = ObjectsFem.makeMeshGmsh(doc, "FEMMesh")
     mesh.Shape = obj
+    # set before GmshTools is built: it only mkdtemps a directory of its own when
+    # this is not already one, which is how the mesher's scratch joins the
+    # solver's under a single directory fcad removes afterwards.
+    mesh.WorkingDirectory = work
     mesh.CharacteristicLengthMax = _mesh_size(case, shape)
     _mesh_limits(mesh, case)
     mesh.ElementOrder = ELEMENT_ORDER
     mesh.SecondOrderLinear = SECOND_ORDER_LINEAR
     analysis.addObject(mesh)
     doc.recompute()
-    _preflight(target, mesh, _mesh(target, mesh))
+    _preflight(target, mesh, _mesh(target, mesh, work))
 
     out = {"target": target, "units": "mm/MPa", "n_modes": 0}
     solver.AnalysisType = "static"
-    static = _run(analysis, solver, target, mesh, directions)[0]
+    static = _run(analysis, solver, target, mesh, directions, work)[0]
     coords, tris, node_ids = _boundary(static.Mesh.FemMesh)
     disp = _disp(static, node_ids)
     vm = np.array(_field(static, node_ids, "vonMises"), np.float32)
@@ -531,7 +572,7 @@ def solve(project, values, target, dist):
     if modes > 0:
         solver.AnalysisType = "frequency"
         solver.EigenmodesCount = modes
-        results = sorted(_run(analysis, solver, target, mesh, directions),
+        results = sorted(_run(analysis, solver, target, mesh, directions, work),
                          key=lambda r: r.EigenmodeFrequency)
         out["n_modes"] = len(results)
         out["mode_freqs"] = np.array([r.EigenmodeFrequency for r in results], np.float32)

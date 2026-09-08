@@ -175,17 +175,21 @@ never regress on them.
   not just `App`: FreeCAD only registers a module's types once that module is
   imported, so an index naming a couple of hundred types is the requirement and a
   few dozen means the reference is silently near-empty.
-- R5.6 `install-skill [--dir DIR] [--force]` installs the agent skill fcad ships
-  (default `~/.claude/skills/freecad-python`): its `SKILL.md` verbatim, a curated
+- R5.6 `install-skill [--dir DIR] [--force]` installs the agent skills fcad ships
+  (default under `~/.claude/skills/`). two of them: `fcad`, which is fcad's own
+  contract and ships complete as prose, and `freecad-python`, which documents the
+  FreeCAD api underneath it and cannot ship complete. the latter installs its
+  `SKILL.md` verbatim, a curated
   subset of the FreeCAD wiki (CC0) covering the scripting semantics introspection
   cannot supply, and an `api/` reference (R5.5) generated for the FreeCAD
-  installed on that machine - the last of which is why the skill cannot simply be
-  committed complete. re-running it is the update path: it records which build
-  the reference describes and regenerates when that build, or the shipped
-  `SKILL.md`, has changed, reporting a no-op otherwise; `--force` regenerates
-  regardless. it overwrites only what it ships - `SKILL.md`, `api/`, and the wiki
-  pages by name - and never deletes, so a fuller wiki mirror or local notes in
-  the same directory survive an install.
+  installed on that machine - the last of which is why that skill cannot simply
+  be committed complete. re-running it is the update path for both: the
+  api-bearing one records which build its reference describes and regenerates
+  when that build or its shipped `SKILL.md` has changed, the prose one whenever
+  its shipped `SKILL.md` has, and each reports a no-op otherwise; `--force`
+  regenerates regardless. each overwrites only what it ships - `SKILL.md`,
+  `api/`, and the wiki pages by name - and never deletes, so a fuller wiki mirror
+  or local notes in the same directory survive an install.
 - R5.4 the freecad binaries are overridable via `--freecad`/`--freecad-gui` or the
   `FREECAD`/`FREECAD_GUI` env vars.
 

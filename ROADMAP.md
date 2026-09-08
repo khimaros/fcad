@@ -20,6 +20,39 @@
 
 ## done
 
+- **the animation stopped eating the machine.** three compounding faults, found
+  when `FCAD_AT_ONCE=1 fcad animate --speed 0.7` on the planter took the box out.
+  (1) **the gif writer buffered every frame.** matplotlib's `PillowWriter` holds
+  the whole clip in memory until the end, so 3854 frames wanted **8 GB** for a
+  model whose geometry is 0.7 MB. both formats now stream through ffmpeg, with
+  the gif palette generated in its own pass rather than the usual single-pass
+  `split/palettegen/paletteuse`, which has to hold one branch while the other is
+  computed - the same problem wearing a different hat. (2) **fasteners each took
+  an arrival slot.** the planter is 224 instances of which **180 are screws**, so
+  four fifths of a 269-second film was screws appearing one at a time. they share
+  one slot now: the structure is what a viewer reads, the screws are punctuation.
+  that alone took the clip from 3854 frames to 786. (3) **nothing bounded the
+  frame count**, which the derived duration made easy to overshoot; `plan()`
+  announces the clip and refuses past `FCAD_MAX_FRAMES` naming the levers. also
+  fixed the per-frame churn: poses are written into one preallocated buffer
+  rather than rebuilding and concatenating the whole model every frame. the
+  user's original command now runs in 254s at **0.29 GB**.
+- **fcad stopped leaking scratch into tmpfs.** FreeCAD gives the mesher and the
+  solver a fresh `mkdtemp` each and removes neither, so every `fcad fem` left two
+  directories behind - and `/tmp` is tmpfs, so that is not litter on a disk but
+  resident memory held until reboot, ~750 KB for a toy beam and hundreds of MB
+  for a real mesh, once per solve, forever. fcad owns one directory per solve and
+  removes it; `FCAD_KEEP_WORK` keeps it and says where, since the `.inp` and
+  `.frd` are what you want when a solve misbehaves. the mesher's half is the easy
+  one to miss: `GmshTools.prepare()` calls `get_tmp_file_paths()` with no
+  argument, which ignores the mesh object's `WorkingDirectory` entirely, so the
+  call has to be made by hand.
+- **`install-skill` installs fcad's own skill too.** `SKILL.md` moved into
+  `resources/skills/fcad/` so it ships in the wheel at all, and there are now two
+  skills: `fcad`, the project contract and cli, which ships complete as prose,
+  and `freecad-python`, which carries the build-specific api reference. each
+  reports its own freshness, so a FreeCAD upgrade refreshes the reference while
+  the prose one correctly stays a no-op.
 - **`animate`: the model building itself.** each instance flies in from an
   exploded position to where it belongs, one at a time. this is now what a bare
   `fcad animate` does, because a model assembling itself says more in ten seconds

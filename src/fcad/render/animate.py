@@ -45,7 +45,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
+from matplotlib.animation import FuncAnimation
 
 from fcad.render import MESH_SECONDS, assemble, render
 
@@ -84,24 +84,32 @@ def _assemble(fig, target, name, dist, how):
             "fcad animate: --subject assemble builds the whole assembly, but "
             "TARGET names the part %r. drop the target, or use --subject static "
             "to spin that part on its own." % target)
-    parts = assemble.order(assemble.instances(name, dist, CLUSTER), how,
-                           assemble.flags(name, dist))
+    marks = assemble.flags(name, dist)
+    parts = assemble.order(assemble.instances(name, dist, CLUSTER), how, marks)
     if not parts:
         raise SystemExit("fcad animate: no part stls + placements to assemble "
                          "for %r - run `fcad build parts assembly` first" % target)
-    home = [tris for _, tris in parts]
+    home = np.concatenate([tris for _, tris in parts])
     offs = assemble.offsets(parts)
-    ax = render.make_axes(fig, np.concatenate(home))
+    slot, count = assemble.slots(parts, marks)
+    # one row block per part, so a frame is written into a single preallocated
+    # buffer rather than rebuilt as a list of arrays and concatenated - that
+    # allocated two copies of the whole model on every one of thousands of frames.
+    edge = np.cumsum([0] + [len(tris) for _, tris in parts])
+    ax = render.make_axes(fig, home)
     colls = ax.collections[0]
     ax.set_title("%s  assembling %d parts" % (target, len(parts)))
+    buf = np.empty_like(home)
 
     def pose(frac):
-        placed = [h + (1.0 - assemble.arrival(frac, i, len(parts))) * o
-                  for i, (h, o) in enumerate(zip(home, offs))]
-        colls.set_verts(np.concatenate(placed))
+        for i, off in enumerate(offs):
+            lo, hi = edge[i], edge[i + 1]
+            away = 1.0 - assemble.arrival(frac, slot[i], count)
+            np.add(home[lo:hi], away * off, out=buf[lo:hi])
+        colls.set_verts(buf)
 
     pose(0.0)
-    return ax, pose, assemble.duration(len(parts))
+    return ax, pose, assemble.duration(count)
 
 
 def animate(target="assembly", stem=None, name=None, dist=None, camera="orbit",
@@ -115,6 +123,7 @@ def animate(target="assembly", stem=None, name=None, dist=None, camera="orbit",
     else:
         ax, pose, natural = _static(fig, target, name, dist)
     frames = render.frames_for(render.length(natural, seconds, speed), fps)
+    render.plan(frames, fps, "%s %s" % (target, subject))
     render.aim(ax)
 
     def update(i):
@@ -126,11 +135,8 @@ def animate(target="assembly", stem=None, name=None, dist=None, camera="orbit",
     anim = FuncAnimation(fig, update, frames=frames, interval=1000.0 / fps)
     stem = stem or os.path.join(
         dist, ("assemble_%s" if subject == "assemble" else "spin_%s") % target)
-    mp4, gif = stem + ".mp4", stem + ".gif"
-    anim.save(mp4, writer=FFMpegWriter(fps=fps), dpi=DPI)
-    anim.save(gif, writer=PillowWriter(fps=fps), dpi=DPI)
-    print("animated %s -> %s, %s (%.1fs at %d fps)"
-          % (target, mp4, gif, frames / float(fps), fps))
+    mp4, gif = render.save(anim, stem, fps, DPI)
+    print("animated %s -> %s, %s" % (target, mp4, gif))
 
 
 if __name__ == "__main__":

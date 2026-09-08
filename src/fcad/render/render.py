@@ -8,6 +8,7 @@ runs under plain python (no FreeCAD), so the model name + dist dir are passed in
 
 import math
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -15,6 +16,7 @@ from stl import mesh as stl_mesh
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.animation import FFMpegWriter
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 WOOD = (0.82, 0.71, 0.55)
@@ -29,6 +31,53 @@ ELEV = float(os.environ.get("FCAD_ELEV", 22))
 AZIM = float(os.environ.get("FCAD_AZIM", -58))
 TILT = float(os.environ.get("FCAD_TILT", 62))
 SPEED = float(os.environ.get("FCAD_SPEED", 1.0))   # playback multiplier
+
+
+# a clip's length is derived from what it shows, so an enormous one is easy to
+# ask for without meaning to: a 224-instance assembly arriving a part at a time
+# is 269 seconds, and at 10 fps that is 2698 full redraws. this is a patience
+# ceiling, checked before any of them happen.
+MAX_FRAMES = int(os.environ.get("FCAD_MAX_FRAMES", 2000))
+
+
+def plan(frames, fps, label):
+    """announce the clip about to be drawn, and refuse an unreasonable one."""
+    if frames > MAX_FRAMES:
+        raise SystemExit(
+            "fcad: %s would be %d frames (%.0fs at %d fps), past the %d-frame "
+            "ceiling, and every frame is a full redraw. raise --speed, raise "
+            "FCAD_AT_ONCE so more parts arrive together, set --seconds to fix "
+            "the length outright, lower --fps, or raise FCAD_MAX_FRAMES."
+            % (label, frames, frames / float(fps), fps, MAX_FRAMES))
+    print("%s: %d frames, %.1fs at %d fps" % (label, frames,
+                                              frames / float(fps), fps))
+
+
+def save(anim, stem, fps, dpi):
+    """write the clip as mp4, then transcode it to gif. both stream.
+
+    matplotlib's PillowWriter holds every frame in memory until the end, so a
+    long clip buffers gigabytes rather than bytes: the planter's 3854-frame
+    assembly animation wanted 8 GB of frame buffer for a model whose geometry is
+    0.7 MB, and took the machine down with it. ffmpeg writes as it goes.
+
+    the palette gets its own pass rather than the usual single-pass
+    split/palettegen/paletteuse filter, because that form has to hold the video
+    branch while the palette is computed off the other one - which is the same
+    problem wearing a different hat."""
+    mp4, gif = stem + ".mp4", stem + ".gif"
+    anim.save(mp4, writer=FFMpegWriter(fps=fps), dpi=dpi)
+    palette = stem + ".palette.png"
+    quiet = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    try:
+        subprocess.run(quiet + ["-i", mp4, "-vf", "palettegen", palette],
+                       check=True)
+        subprocess.run(quiet + ["-i", mp4, "-i", palette, "-lavfi",
+                                "paletteuse", "-loop", "0", gif], check=True)
+    finally:
+        if os.path.exists(palette):
+            os.remove(palette)
+    return mp4, gif
 
 
 def length(natural, seconds=None, speed=None):

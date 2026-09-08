@@ -131,9 +131,21 @@ def _skill_checks(root):
     rc, first = _cli(["install-skill", "--dir", root])
     installed = os.path.exists(os.path.join(out, "SKILL.md"))
     pages = [f for f in os.listdir(wiki) if f.endswith(".md")]
+    # fcad's own contract ships as a second skill beside the api one. it needs no
+    # generated half, so it must install without one rather than being skipped.
+    own = os.path.join(root, "fcad", "SKILL.md")
+    own_shipped = _read(os.path.join(
+        os.path.dirname(os.path.abspath(fcad.__file__)),
+        "resources", "skills", "fcad", "SKILL.md"))
     checks = [
         ("install-skill exits 0", rc == 0),
         ("installs SKILL.md", installed),
+        ("installs the fcad skill too, verbatim",
+         os.path.exists(own) and _read(own) == own_shipped),
+        ("and that one carries no api/ it does not need",
+         not os.path.exists(os.path.join(root, "fcad", "api"))),
+        ("the fcad skill declares itself as such",
+         own_shipped is not None and "name: fcad" in own_shipped),
         ("installs the shipped SKILL.md verbatim",
          installed and _read(os.path.join(out, "SKILL.md")) == shipped),
         ("generates the api reference beside it",
@@ -158,13 +170,19 @@ def _skill_checks(root):
     with open(stamp, "w") as f:
         f.write("FreeCAD 0.21 Revision: stale\n")
     rc_stale, stale = _cli(["install-skill", "--dir", root])
+    # each skill reports for itself, so these name the one they mean: a stale api
+    # stamp must refresh `freecad-python` while `fcad`, whose prose has not
+    # changed, correctly stays a no-op.
+    current = "%s already current" % cli.SKILL_NAME
     return checks + [
         ("rerunning is a no-op on an unchanged build",
-         rc_again == 0 and "already current" in again),
+         rc_again == 0 and current in again and "fcad already current" in again),
         ("--force regenerates anyway",
          rc_force == 0 and "already current" not in forced),
-        ("a changed freecad build triggers a refresh",
-         rc_stale == 0 and "already current" not in stale),
+        ("a changed freecad build refreshes the api skill",
+         rc_stale == 0 and current not in stale),
+        ("without disturbing the skill that does not depend on the build",
+         "fcad already current" in stale),
         ("the refresh restores the current build stamp",
          "FreeCAD" in _read(stamp) and "stale" not in _read(stamp)),
     ]

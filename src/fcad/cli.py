@@ -23,8 +23,12 @@ from fcad.render import CAMERAS, FEM_SECONDS, MESH_SUBJECTS, ORDERS, SUBJECTS
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
                  "drawings", "sketches", "bom", "cutlist"]
 
-# the agent skill fcad ships, installed into a claude skills directory.
-SKILL_NAME = "freecad-python"
+# the agent skills fcad ships, installed into a claude skills directory. `fcad`
+# is fcad's own contract; `freecad-python` is the FreeCAD api underneath it and
+# is the only one carrying a generated, build-specific reference.
+SKILLS = ("fcad", "freecad-python")
+API_SKILL = "freecad-python"
+SKILL_NAME = API_SKILL          # kept: tests and callers name the api skill
 SKILL_DIR = os.path.expanduser("~/.claude/skills")
 # records which freecad the installed `api/` describes. the reference is only
 # valid for the build that produced it, and `freecadcmd --version` is a 50ms
@@ -244,38 +248,56 @@ def _install_wiki(source, dest):
 
 
 def _install_skill(cfg, skill_dir=None, force=False):
-    """install (or refresh) the bundled agent skill: prose, wiki, api reference.
+    """install (or refresh) every agent skill fcad ships.
 
-    the skill is shipped by fcad rather than hand-maintained because its api
-    reference has to come from the freecad actually installed, which only the
-    machine running it knows. re-running is the update path: the reference is
-    pinned to a build, so it is regenerated when that build changes and skipped
-    when it has not."""
+    two of them, and they are different kinds of thing. `fcad` is fcad's own
+    contract - the project surface, the cli, the traps - and is prose that ships
+    complete. `freecad-python` documents the FreeCAD api underneath it, and
+    cannot ship complete: half of it is a reference generated against whichever
+    FreeCAD is installed on the machine running this."""
     import fcad
-    pkg = os.path.dirname(os.path.abspath(fcad.__file__))
-    skill = os.path.join(pkg, "resources", "skills", SKILL_NAME)
-    source = os.path.join(skill, "SKILL.md")
-    out = os.path.join(skill_dir or SKILL_DIR, SKILL_NAME)
-    api = os.path.join(out, "api")
-    stamp = os.path.join(api, SKILL_STAMP)
+    root = os.path.join(os.path.dirname(os.path.abspath(fcad.__file__)),
+                        "resources", "skills")
+    base = skill_dir or SKILL_DIR
+    rc = 0
+    for name in SKILLS:
+        rc = _install_one(cfg, root, base, name, force) or rc
+    return rc
 
-    build = _freecad_build(cfg)
-    wanted = _read(source)
-    current = (build and (_read(stamp) or "").strip() == build
-               and _read(os.path.join(out, "SKILL.md")) == wanted)
+
+def _install_one(cfg, root, base, name, force):
+    """install one shipped skill, generating its api reference if it has one.
+
+    re-running is the update path. only the api-bearing skill needs the build
+    stamp, because only its content depends on the local FreeCAD; the other is
+    current whenever the shipped prose matches what is installed."""
+    skill, out = os.path.join(root, name), os.path.join(base, name)
+    wanted = _read(os.path.join(skill, "SKILL.md"))
+    api = os.path.join(out, "api")
+    build = _freecad_build(cfg) if name == API_SKILL else ""
+
+    current = _read(os.path.join(out, "SKILL.md")) == wanted
+    if name == API_SKILL:
+        current = current and build and (
+            _read(os.path.join(api, SKILL_STAMP)) or "").strip() == build
     if current and not force:
-        print("install-skill: already current for %s -> %s" % (build, out))
+        print("install-skill: %s already current -> %s" % (name, out))
+        return 0
+
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "SKILL.md"), "w") as f:
+        f.write(wanted)
+    if name != API_SKILL:
+        print("installed skill: %s" % out)
         return 0
 
     os.makedirs(api, exist_ok=True)
-    with open(os.path.join(out, "SKILL.md"), "w") as f:
-        f.write(wanted)
     pages = _install_wiki(os.path.join(skill, "wiki"), os.path.join(out, "wiki"))
     rc = run_entry(cfg, ["api-docs"], env_extra={"FCAD_API_OUT": api})
     if rc:
         return rc
     if build:
-        with open(stamp, "w") as f:
+        with open(os.path.join(api, SKILL_STAMP), "w") as f:
             f.write(build + "\n")
     print("installed skill: %s (%d wiki pages)" % (out, pages))
     return 0

@@ -1,6 +1,6 @@
 ---
 name: fcad
-description: the fcad instrumentation package and its `fcad` cli - the project contract (PARAMS + compute, fcad.Part, PARAM_META/FEM/MATERIAL/STOCK), build targets, dist/ layout, check/fem/cutlist/diff. use whenever a `.fcad` file,  exposing PARAMS+compute, the `fcad` command  - including "add a part", "add a parameter", "why is check failing", "run the fem", "what lumber do i buy". this covers fcad's own contract only, not the FreeCAD API itself.
+description: the fcad instrumentation package and its `fcad` cli - the project contract (PARAMS + compute, fcad.Part, PARAM_META/FEM/MATERIAL/STOCK), build targets, dist/ layout, check/fem/cutlist/diff/animate. use whenever a `.fcad` file,  exposing PARAMS+compute, the `fcad` command  - including "add a part", "add a parameter", "why is check failing", "run the fem", "what lumber do i buy", "animate the assembly". this covers fcad's own contract only, not the FreeCAD API itself.
 ---
 
 # fcad
@@ -84,6 +84,13 @@ fcad.Part(name, placements, solid=None, profile2d=None, profile="",
 - `embeds` - excluded from the interference check and the fem fuse. anything that
   intentionally sinks into other solids (screws) needs this or `check` fails.
 
+`grounded` and `embeds` do double duty: they also order the assembly animation,
+which walks outward from the grounded part over what touches what and holds the
+`embeds` parts to the end. so flagging them correctly is what makes
+`fcad animate` read as construction - unflagged, it falls back to a z-sort and
+drives screws home midway up the stack. no separate annotation exists or is
+needed for this.
+
 a project may return its own duck-typed spec instead, exposing the same surface.
 
 ### varset schema inference
@@ -113,14 +120,27 @@ fcad build [TARGET ...]   no target = all; one freecadcmd pass per token
 fcad check                interference + constrained components + constrained sketches
 fcad precommit            build all, then check
 fcad view [parts]         gui; --part NAME for one part
-fcad render|animate [T]   offscreen png / turntable mp4+gif from a built stl
+fcad render|animate [T]   offscreen png / mp4+gif from a built stl
 fcad fem [T]              headless gmsh + CalculiX; --modal / --modes K
 fcad fem-render|fem-animate [T]
 fcad diff|diff-build|diff-open [T]
-fcad pdf | clean | info | install-macro | help [COMMAND]
+fcad api-docs [DIR] | install-skill    reference for the installed FreeCAD
+fcad pdf | clean | info | install-macro | install-git | help [COMMAND]
 ```
 
-`TARGET` is `assembly` (default) or a part name.
+`TARGET` is `assembly` (default) or a part name; `fcad fem all` works through
+every case the project declares.
+
+**animating** is a camera crossed with a subject, shared by both animators.
+`--camera orbit|turntable|fixed` (orbit sweeps its elevation so the underside
+comes into view; turntable spins level). `fcad animate` defaults to
+`--subject assemble`, the model building itself part by part; `--subject static`
+orbits it whole, and a part target spins on its own since it has nothing to
+assemble. `fcad fem-animate --subject all|flex|static|modes`, where `static`
+holds peak deflection and lets the camera work - usually the clip worth having.
+length is derived from the content (an assembly of twenty parts arriving singly
+is a longer film than three), so `--speed` multiplies it rather than `--seconds`
+setting it.
 
 **build targets:** `parts assembly step stl svg dxf drawings sketches bom
 cutlist`. multiple tokens union. stage-bound tokens keep their meaning:
@@ -141,10 +161,16 @@ sketches/<name>.{svg,dxf}                       defining sketches, parts only
 <name>.{FCStd,step,stl,svg,dxf}                 the linked assembly + exports
 <name>-bom.csv          part,qty,profile,length_mm
 <name>-cutlist.csv      profile,pattern,stock_mm,boards,cut_mm,per_board,offcut_mm
-render_<target>.png   spin_<target>.{mp4,gif}
+<name>-placements.json  per-instance placements, for the 3d diff
+<name>-parts.json       per-part grounded/embeds, for the assembly animation
+render_<target>.png   assemble_<target>.{mp4,gif}   spin_<target>.{mp4,gif}
 <target>.fem.{FCStd,npz}   fem_<target>.png   fem_<target>.{mp4,gif}
 <target>.diff.FCStd
 ```
+
+the two json files exist because a renderer runs outside FreeCAD and cannot call
+`compute`: the diff needs both revisions' placements, and the animator needs the
+flags. every assembly build writes them whatever formats were asked for.
 
 the assembly `.FCStd` is a real Assembly-workbench assembly: each instance is an
 `App::Link` into its part file, grounded or Fixed-jointed and solved.
@@ -156,12 +182,29 @@ the assembly `.FCStd` is a real Assembly-workbench assembly: each instance is an
 
 | key | meaning |
 | --- | --- |
-| `fixed` | list of face selectors (default: `min_along("z")`) |
+| `fixed` | list of face selectors, clamping the face outright (default: `min_along("z")`) |
+| `supports` | `[dict(faces=[...], fix="yz")]` - restrain only the named axes |
 | `loads` | list of load dicts |
 | `self_weight` | default `not loads`; `gravity` defaults to `(0,0,-1)` |
 | `mesh_size` | clamped to 1..25 mm; default bbox diagonal / 20 |
+| `mesh_min` / `mesh_curvature` | element floor, and how hard gmsh chases curvature (12/turn) |
+| `undrilled` | build parts from their 2d profile, dropping the holes |
 | `modes` | eigenmode count |
 | `material` | library card name, an fcad alias (`steel`/`aluminum`/`wood`/...), a `MATERIALS` name, or `{E, nu, rho}`; falls back to `MATERIAL` |
+
+`fixed` is a clamp: every node pinned, so the face cannot rotate. clamping both
+ends of a member reads exactly 5x stiff against one resting on its bearings, and
+a third light on peak moment. `supports` with an axis left free lets the end
+rotate - clamp one end and roller the other and a uniformly loaded beam carries
+the right `wL^2/8`. all the closed forms here are span- and section-independent,
+so a beam that misses them has a bug rather than a shape.
+
+`undrilled` is usually what makes a whole-assembly solve possible at all: gmsh
+sizes elements from curvature, so a 4 mm pilot hole demands ~1 mm elements
+however coarse `mesh_size` is, and a fastened assembly spends every node on
+fastener holes and never finishes meshing. turning `mesh_curvature` *down* is not
+the equivalent workaround - below the default a small hole cannot be meshed at
+all and gmsh returns nothing rather than a coarser hole.
 
 a load: `kind` (`"force"` default, or `"pressure"`), `faces`, `magnitude`,
 `direction` (force only, default `"-z"`), `reversed` (pressure only).
@@ -182,6 +225,13 @@ fs.all_of(...)      fs.any_of(...)       fs.invert(sel)
 shorthands `("z", "min")` / `("x", "max")` and a literal `"Face6"` escape hatch
 are accepted too. absent a `FEM` descriptor a target still solves under a default
 (fix the base, self-weight, steel).
+
+the npz carries `von_mises_p95`/`p99` beside `von_mises` - **read those, not the
+max** (see the traps below). the mesh is 2nd-order; a solve is refused before
+CalculiX starts if the node count will not fit memory, with the node count and
+the ceiling named, and `FCAD_MEM` raises it. results are reproducible: both tools
+are pinned to one thread, which `FCAD_FEM_THREADS` / `FCAD_FEM_MESH_THREADS`
+undo at the cost of that guarantee.
 
 needs `gmsh` and `ccx` on PATH.
 
@@ -237,3 +287,18 @@ Macro menu.
 - forget `embeds=True` on a fastener and `check` reports it as interference.
 - `length` defaults to the bbox X-extent; mitered or rotated parts usually need
   it stated.
+- **the peak von Mises is a property of the mesh, not of the part.** it lands on
+  whatever singularity the model contains - a clamped face, the sharp corner of a
+  notch - where linear elasticity has no finite answer, so it simply grows as the
+  mesh is refined. the shipped cantilever goes from 74.9 to 12848 MPa between
+  `mesh_size` 6 and 2 while its p95 stays near 70 and its deflection does not
+  move. quote `von_mises_p95`, and treat `max` as a sample. (the caveat on p95:
+  it is a floor on the field stress, since on a clamped model the moment peaks at
+  the constrained end and a percentile discards exactly those nodes.)
+- **the assembly fem target is one welded body.** fcad fuses the structural
+  solids, so every butt joint becomes a weld and the box reads ~10x stiffer than
+  the screwed frame it models. it is a picture of load flow, not a number to size
+  against - size against the per-part cases.
+- a fem case tuned before 2nd-order meshing will be far too fine: the same
+  `mesh_size` now carries several times the nodes. if a solve is refused for
+  memory, raise `mesh_size` rather than reaching for `FCAD_MEM`.

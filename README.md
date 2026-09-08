@@ -459,12 +459,15 @@ instead of letting it guess property names.
 ### as an agent skill
 
 ```
-fcad install-skill        # -> ~/.claude/skills/freecad-python/
+fcad install-skill        # -> ~/.claude/skills/{fcad,freecad-python}/
 ```
 
-installs the skill fcad ships: scripting rules and traps, 52 curated pages of the
+installs both skills fcad ships. **`fcad`** is fcad's own contract: the project
+surface (`PARAMS` + `compute`, `fcad.Part`, `FEM`, `STOCK`), the cli, what lands
+in `dist/`, and the traps that are fcad's own. **`freecad-python`** is the
+FreeCAD api underneath it: scripting rules and traps, 52 curated pages of the
 FreeCAD wiki (CC0), and the `api/` reference above generated for *your* FreeCAD.
-that last part is why the skill cannot just be committed somewhere complete -
+that last part is why that one cannot just be committed somewhere complete --
 half of it only exists once it meets the machine it runs on.
 
 the wiki pages and `api/` answer different questions, which is why both are
@@ -475,9 +478,10 @@ is deliberate. the full export is 2630 pages and 22 MB, of which 599 are stubs
 and 926 are gui pages with no python in them; the 52 kept are ~2% of the files
 and carry essentially all of the scripting value.
 
-re-run it after a FreeCAD upgrade. it records which build the reference
-describes and regenerates only when that (or the shipped `SKILL.md`) has
-changed, so the common case costs a tenth of a second and says so; `--force`
+re-run it after a FreeCAD upgrade, or after updating fcad. each skill reports for
+itself: the api one records which build its reference describes and regenerates
+when that or its shipped `SKILL.md` has changed, the `fcad` one whenever its
+prose has, so the common case costs a tenth of a second and says so; `--force`
 regenerates regardless. it overwrites only what it ships and never deletes, so
 if you clone the full wiki export in beside it your extra pages survive.
 

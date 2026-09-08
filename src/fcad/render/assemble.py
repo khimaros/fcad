@@ -210,6 +210,32 @@ def offsets(parts):
     return out
 
 
+def slots(parts, marks):
+    """(slot index per part, number of slots): when each part arrives.
+
+    fasteners share a single slot instead of taking one each. the planter has
+    180 screws against 44 structural pieces, so giving every screw its own
+    arrival made a 269-second film of which four fifths was watching screws
+    appear one at a time - and it is what turned one clip into 3854 frames and
+    8 GB of buffered gif. the structure is the thing being read; the screws are
+    punctuation at the end of it.
+
+    `order` has already put the fasteners last, so the structural parts take
+    slots 0..n-1 in sequence and every fastener takes slot n."""
+    fastener = [bool(marks.get(label.rsplit(".", 1)[0], {}).get("embeds"))
+                for label, _ in parts]
+    index, out = 0, []
+    for is_bolt in fastener:
+        if is_bolt:
+            out.append(-1)                      # filled in once n is known
+        else:
+            out.append(index)
+            index += 1
+    if not any(s == -1 for s in out):
+        return out, max(1, index)
+    return [index if s == -1 else s for s in out], index + 1
+
+
 def spacing_for(at_once=AT_ONCE):
     """seconds between one part's departure and the next.
 

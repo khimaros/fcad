@@ -40,9 +40,10 @@ src/fcad/
     render.py  animate.py  fem_render.py  fem_animate.py
   resources/macros/rebuild.FCMacro
   resources/templates/fcad_A4_landscape.svg
-  resources/skills/freecad-python/    installed by `install-skill`:
-    SKILL.md                          the prose
-    wiki/                             52 curated wiki pages (CC0) + NOTICE.md
+  resources/skills/                   both installed by `install-skill`:
+    fcad/SKILL.md                     fcad's own contract; ships complete
+    freecad-python/SKILL.md           the FreeCAD api beneath it
+    freecad-python/wiki/              52 curated wiki pages (CC0) + NOTICE.md
 ```
 
 ## how the cli reaches FreeCAD

@@ -37,7 +37,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
+from matplotlib.animation import FuncAnimation
 
 from fcad.render import FEM_SECONDS, render, fem_render
 
@@ -48,13 +48,6 @@ DPI = int(os.environ.get("FCAD_DPI", 90))
 # side is seen at a different deflection, so two faces cannot be compared, which
 # is most of what an orbit is for. an integer keeps the loop seamless.
 CYCLES = int(os.environ.get("FCAD_FEM_CYCLES", 4))
-
-
-def _save(anim, stem, fps):
-    mp4, gif = stem + ".mp4", stem + ".gif"
-    anim.save(mp4, writer=FFMpegWriter(fps=fps), dpi=DPI)
-    anim.save(gif, writer=PillowWriter(fps=fps), dpi=DPI)
-    return mp4, gif
 
 
 def _clip(nodes, tris, field, mode_disp, peak_scale, title, stem, label,
@@ -83,7 +76,7 @@ def _clip(nodes, tris, field, mode_disp, peak_scale, title, stem, label,
         return ()
 
     anim = FuncAnimation(fig, update, frames=frames, interval=1000.0 / fps)
-    mp4, gif = _save(anim, stem, fps)
+    mp4, gif = render.save(anim, stem, fps, DPI)
     plt.close(fig)
     return mp4, gif
 
@@ -95,6 +88,7 @@ def animate(target="assembly", stem=None, name=None, dist=None,
     # a flex cycle or a mode has no part count to make it longer, so its natural
     # length is just the default; speed scales it as it does an assembly.
     frames = render.frames_for(render.length(SECONDS, seconds, speed), fps)
+    render.plan(frames, fps, "%s %s" % (target, subject))
     clip = lambda *a, **kw: _clip(*a, frames=frames, fps=fps, **kw)
     data = np.load(fem_render.npz_path(target, name, dist))
     nodes, tris = data["nodes"], data["tris"]

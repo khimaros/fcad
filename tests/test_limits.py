@@ -58,6 +58,7 @@ TINY_BUDGET = "1M"          # smaller than any real solve, so the guard must fir
 AMPLE_BUDGET = "8G"         # far above it, so the same solve must still run
 MESH_TIMEOUT = "0.05"       # seconds; gmsh cannot finish a solid in 50ms
 MARK = "FCADLIMITS"         # child's answer, told apart from FreeCAD's greeting
+KEEP_WORK = "FCAD_KEEP_WORK"
 
 # the fit itself, checked at the node counts it was measured over: peak ccx RSS
 # on a 2nd-order steel cantilever was 96 MB at 8181 nodes and 2.25 GB at 100855.
@@ -150,6 +151,40 @@ def _preflight_checks(cfg):
     ]
 
 
+def _workdir_checks(cfg):
+    """R6.5: a solve leaves no scratch behind.
+
+    FreeCAD hands the mesher and the solver a fresh mkdtemp each and removes
+    neither, so every solve used to leak two directories - and on linux /tmp is
+    tmpfs, which makes those resident memory held until reboot rather than files
+    on a disk. a few hundred KB for this beam, hundreds of MB for a real mesh,
+    once per solve, forever. the mesher's is the easy one to miss: its
+    `prepare()` calls `get_tmp_file_paths()` with no argument, which ignores the
+    mesh object's WorkingDirectory entirely."""
+    shutil.rmtree(cfg.dist, ignore_errors=True)
+    before = _scratch()
+    rc, _ = _fem(cfg, {limits.MEM_ENV: AMPLE_BUDGET})
+    after = _scratch()
+    kept_rc, kept = _fem(cfg, {limits.MEM_ENV: AMPLE_BUDGET, KEEP_WORK: "1"})
+    held = _scratch() - after
+    for path in held:
+        shutil.rmtree(path, ignore_errors=True)
+    return [
+        ("the solve ran", rc == 0 and kept_rc == 0),
+        ("and left no working directory behind %s" % sorted(after - before),
+         after == before),
+        ("%s keeps them instead" % KEEP_WORK, len(held) == 1),
+        ("and says where", kept_rc == 0 and "fem work kept:" in kept),
+    ]
+
+
+def _scratch():
+    """the FEM scratch directories currently sitting in the temp dir."""
+    tmp = tempfile.gettempdir()
+    return {os.path.join(tmp, d) for d in os.listdir(tmp)
+            if d.startswith(("fcfem_", "fcad_fem_", "fem_"))}
+
+
 def _mesh_timeout_checks(cfg):
     """R6.5: a mesher that overruns is killed and named, not waited on forever."""
     shutil.rmtree(cfg.dist, ignore_errors=True)
@@ -215,7 +250,8 @@ def main():
     try:
         cfg = _project(root)
         checks = (_unit_checks() + _budget_checks() + _child_checks()
-                  + _preflight_checks(cfg) + _mesh_timeout_checks(cfg))
+                  + _preflight_checks(cfg) + _workdir_checks(cfg)
+                  + _mesh_timeout_checks(cfg))
     finally:
         shutil.rmtree(root, ignore_errors=True)
     failed = [name for name, ok in checks if not ok]
