@@ -12,12 +12,12 @@ import os
 import shutil
 import sys
 
-from fcad import __version__, config
+from fcad import __version__, config, cutlist
 from fcad._run import run_entry
 
 # headless build/validate commands handled by freecad/_entry's dispatch path.
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
-                 "drawings", "sketches", "bom"]
+                 "drawings", "sketches", "bom", "cutlist"]
 
 
 def _build_parser():
@@ -42,6 +42,20 @@ def _build_parser():
     b = sub.add_parser("build", help="build/export into dist/ (default: all)")
     b.add_argument("targets", nargs="*", metavar="TARGET",
                    help="one or more of: " + " ".join(BUILD_TARGETS) + " (none = all)")
+    # cutlist knobs: what stock is buyable, and what the shop loses cutting it.
+    b.add_argument("--stock", action="append", metavar="SPEC",
+                   help="cutlist stock lengths, overriding the project's STOCK: "
+                        "'8ft,10ft,12ft' or '2x6=8ft,12ft' (mm if unsuffixed; "
+                        "repeatable)")
+    b.add_argument("--kerf", metavar="MM",
+                   help="cutlist saw kerf between adjacent cuts (default %g)"
+                        % cutlist.DEFAULT_KERF)
+    b.add_argument("--trim", metavar="MM",
+                   help="cutlist trim allowance docked off each board "
+                        "(default %g)" % cutlist.DEFAULT_TRIM)
+    b.add_argument("--objective", choices=["length", "boards"],
+                   help="cutlist goal: least purchased length (default) or "
+                        "fewest boards")
     sub.add_parser("check", help="interference + constraint validation")
     sub.add_parser("precommit", help="build all, then check")
 
@@ -121,6 +135,14 @@ def _install_macro(macro_dir=None):
     print("installed macro: " + out)
 
 
+def _cutlist_env(args):
+    """export the build's cutlist flags for the in-freecad builder to read back."""
+    given = ((cutlist.ENV_STOCK, ";".join(args.stock) if args.stock else None),
+             (cutlist.ENV_KERF, args.kerf), (cutlist.ENV_TRIM, args.trim),
+             (cutlist.ENV_OBJECTIVE, args.objective))
+    return {k: v for k, v in given if v}
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -135,7 +157,7 @@ def main(argv=None):
         targets = args.targets or ["all"]
         rc = 0
         for t in targets:
-            rc = run_entry(cfg, [t]) or rc
+            rc = run_entry(cfg, [t], env_extra=_cutlist_env(args)) or rc
         return rc
     if cmd in ("check", "precommit"):
         return run_entry(cfg, [cmd])

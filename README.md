@@ -4,11 +4,12 @@ reusable FreeCAD build + instrumentation for parametric, code-defined models.
 
 fcad drives FreeCAD (python on the OpenCASCADE BREP kernel) to build a model into
 real solids, link them into a true Assembly-workbench assembly, export neutral
-formats (STEP/STL/SVG/DXF), produce a bom and dimensioned TechDraw drawings in
-DXF and PDF (a projection-aligned top/front/right + isometric sheet with a filled
-title block), render offscreen PNGs, animate a turntable, and 3d-diff against git
-HEAD. it knows **nothing** about any particular model: a project supplies its
-geometry and parameters through a single `Project` descriptor.
+formats (STEP/STL/SVG/DXF), produce a bom, a cut list of what stock to buy, and
+dimensioned TechDraw drawings in DXF and PDF (a projection-aligned
+top/front/right + isometric sheet with a filled title block), render offscreen
+PNGs, animate a turntable, and 3d-diff against git HEAD. it knows **nothing**
+about any particular model: a project supplies its geometry and parameters
+through a single `Project` descriptor.
 
 ## install
 
@@ -48,8 +49,8 @@ it). fcad infers the varset (gui parameter panel) schema from each default's
 python type (floats are lengths in mm), computes each part's `qty`/`length`, and
 anchors the assembly's first part when none is flagged. refine only what you
 need with optional globals: `PARAM_META` (per-param group, enum `choices`, or an
-explicit property `type`), `FEM`, `MATERIAL`/`MATERIALS`, and `from_spec`/
-`profile` (if your specs aren't `fcad.Part`).
+explicit property `type`), `FEM`, `MATERIAL`/`MATERIALS`, `STOCK` (see the cut
+list below), and `from_spec`/`profile` (if your specs aren't `fcad.Part`).
 
 `fcad.Part(name, placements, solid=..., profile2d=..., profile=..., holes=...,
 grounded=..., embeds=...)` is the ready-made part: `solid` is a thunk returning
@@ -73,7 +74,9 @@ defaults usually need no overrides.
 
 ```
 fcad build [TARGET ...]   build/export into dist/ (no target = all); TARGET:
-                             parts assembly step stl svg dxf drawings sketches bom
+                             parts assembly step stl svg dxf drawings sketches
+                             bom cutlist
+                          cutlist knobs: --stock/--kerf/--trim/--objective
 fcad check                interference + every component constrained
                              + every sketch fully constrained
 fcad precommit            build all, then check
@@ -117,6 +120,42 @@ while iterating, `fcad build <TARGET>` rebuilds a single artifact (e.g.
 reads the open document's `Parameters` panel and regenerates it. that indirection
 is needed because part and hole **counts** are parametric, so a plain recompute
 cannot add or remove objects.
+
+## cut list (what to buy)
+
+the bom says how many pieces of what length. `fcad build cutlist` says what to
+buy: it packs each profile's pieces into the stock lengths a supplier actually
+sells, charging a saw kerf between adjacent cuts and an optional trim allowance
+off each board, and writes `dist/<name>-cutlist.csv` (per cut pattern: the stock
+length, how many boards take it, the pieces cut from each, the offcut).
+
+which lengths exist is a fact about a supplier, not about fcad, so it comes from
+an optional `STOCK` global: a `{profile: [lengths mm]}` map keyed by the same
+`profile` label the bom uses, or one list for every profile. only a profile
+declared there is planned, so fasteners and bought parts stay out of it.
+
+```python
+FT = 304.8
+STOCK = {"2x6": [8*FT, 10*FT, 12*FT, 16*FT], "2x4": [8*FT, 10*FT, 12*FT]}
+```
+
+```
+$ fcad build cutlist
+  4x4: buy 1 x 3657.6 mm = 1 board(s), 15.3% waste
+  2x6: buy 5 x 4876.8 + 2 x 3657.6 + 2 x 2438.4 mm = 9 board(s), 1.3% waste
+  2x4: buy 1 x 3657.6 mm = 1 board(s), 9.6% waste
+```
+
+override any of it per invocation, no edit to the project: `--stock` (either
+`8ft,10ft,12ft` for every declared profile or `2x6=8ft,12ft` to scope it, mm when
+unsuffixed, repeatable), `--kerf`, `--trim`, and `--objective length|boards`. so
+comparing what your yard racks is one command: `fcad build cutlist --stock
+10ft,12ft --kerf 3.2 --trim 12`.
+
+the plan is exact where the search is small enough to prove it and
+first-fit-decreasing above that; the summary marks a greedy plan `(greedy)` so it
+never claims an optimum it did not find. a piece longer than every stock length
+is reported as a warning, not dropped.
 
 ## FEM (stress + modal)
 

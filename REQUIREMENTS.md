@@ -12,9 +12,9 @@ never regress on them.
   (python by another name: a whole project in one file). it may expose an
   explicit `PROJECT = fcad.Project(...)`, or, equivalently, the conventional
   module globals `PARAMS` + `compute` (plus optional `PARAM_META`, `FEM`,
-  `MATERIAL`, `MATERIALS`, `from_spec`, `profile`, `NAME`), from which fcad
-  assembles the `Project`, inferring the varset schema (property type from each
-  default's python type), enum choices, and per-part `qty`/`length`. either way
+  `MATERIAL`, `MATERIALS`, `STOCK`, `from_spec`, `profile`, `NAME`), from which
+  fcad assembles the `Project`, inferring the varset schema (property type from
+  each default's python type), enum choices, and per-part `qty`/`length`. either way
   fcad reads everything through one `Project` and carries zero model knowledge.
   the explicit form is never removed.
 - R1.1a a part `compute` returns is duck-typed: fcad reads `name`, `placements`,
@@ -35,14 +35,26 @@ never regress on them.
 - R2.1 `build` produces, under `dist/`, for the parts and/or the assembly: the
   `.FCStd` documents, neutral geometry (STEP, STL), outline SVG, dimensioned DXF,
   dimensioned TechDraw drawings (DXF), defining-sketch exports (SVG + DXF, parts
-  only), and a CSV bom (assembly only).
+  only), and a CSV bom and cut list (assembly only).
 - R2.2 `build` accepts target tokens that select a subset:
-  `parts assembly step stl svg dxf drawings sketches bom`; no token means `all`.
-  multiple tokens union. stage-specific tokens keep their meaning (`sketches`
-  parts-only, `bom` assembly-only).
+  `parts assembly step stl svg dxf drawings sketches bom cutlist`; no token means
+  `all`. multiple tokens union. stage-specific tokens keep their meaning
+  (`sketches` parts-only, `bom`/`cutlist` assembly-only).
 - R2.3 the assembly `.FCStd` is a true Assembly-workbench assembly: each instance
   is an `App::Link` into its part file, grounded or fixed-jointed and solved.
 - R2.4 every build runs headlessly with no display (`freecadcmd`).
+- R2.5 the `cutlist` target packs each bom profile's pieces into the stock lengths
+  purchasable for it, writing `dist/<name>-cutlist.csv`: per cut pattern, the
+  stock length, how many boards take that pattern, the pieces cut from each, and
+  the offcut. a saw kerf is charged between adjacent cuts and an optional trim
+  allowance against each board. which lengths exist is market knowledge, never
+  fcad's: they come from the project's `STOCK` (a `{profile: [lengths]}` map, or
+  one list for every profile) and only a profile declared there is planned, so
+  fasteners and bought parts are excluded. `--stock`/`--kerf`/`--trim`/
+  `--objective` override per invocation without editing the project. a plan is
+  exact where the search is small enough to prove and first-fit-decreasing above
+  that, and says which it was; a piece longer than every stock length is reported,
+  never silently dropped.
 
 ## R3 - validate (headless)
 

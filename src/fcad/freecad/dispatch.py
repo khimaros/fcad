@@ -16,11 +16,15 @@ from fcad.freecad import build_parts, build_assembly
 # "sketch" exports the defining 2d sketch (svg + dxf); only parts have one.
 ALL = {"fcstd", "step", "stl", "svg", "dxf", "drawing", "sketch"}
 
+# the bom and the cut list derived from it are assembly-stage only: a part file
+# knows its own length, but only the assembly knows how many of it there are.
+DOCS = {"bom", "cutlist"}
+
 # target -> (formats for parts, formats for assembly). None = skip that stage.
 TARGETS = {
-    "all":      (ALL, ALL | {"bom"}),
+    "all":      (ALL, ALL | DOCS),
     "parts":    (ALL, None),
-    "assembly": (None, ALL | {"bom"}),
+    "assembly": (None, ALL | DOCS),
     "step":     ({"step"}, {"step"}),
     "stl":      ({"stl"}, {"stl"}),
     "svg":      ({"svg"}, {"svg"}),
@@ -28,6 +32,7 @@ TARGETS = {
     "drawings": ({"drawing"}, {"drawing"}),
     "sketches": ({"sketch"}, None),
     "bom":      (None, {"bom"}),
+    "cutlist":  (None, {"cutlist"}),
 }
 
 

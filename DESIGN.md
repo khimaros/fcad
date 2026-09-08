@@ -23,6 +23,7 @@ src/fcad/
                   the varset schema/enum choices from PARAMS when not given
   loader.py       load a project (a dir's project.py or a .fcad file) and return
                   its Project, declared explicitly (PROJECT) or by convention
+  cutlist.py      1d bin packing of the bom into buyable stock (pure stdlib)
   diff.py         worktree orchestration for `diff` (runs under the cli's python)
   fem_select.py   geometry-predicate face selectors for FEM (pure stdlib)
   freecad/        everything that imports FreeCAD (runs under freecadcmd/freecad)
@@ -94,6 +95,16 @@ single file.
   the view-label caption), and a shipped A4 title-block template
   (`resources/templates/`) since the bundled default is blank. the same `_page`
   feeds both the headless DXF (`make_drawing`) and the gui PDF (`export_pdf`).
+- `cutlist` is pure stdlib and never imports FreeCAD, even though the `cutlist`
+  build target runs inside `freecadcmd`: the packing consumes the bom's numbers,
+  not geometry, so the same module is importable by the cli (for its flags and
+  defaults) and by the builder. it carries two solvers because honesty about
+  optimality matters more than always claiming it: a dp over the demand vector
+  while the state x pattern product stays inside a fixed budget, first-fit-
+  decreasing beyond it, with `Plan.exact` recording which one ran. the stock
+  catalog is a project global rather than an fcad table because "what lengths can
+  i buy" is a fact about a supplier, which is exactly the kind of model knowledge
+  the instrumentation must not hold.
 - the gui-only split (`export_pdf`, `diff_doc`, the view-readiers) exists because
   TechDraw's pdf/svg export and Draft layer colors live in the `*Gui` modules,
   which only exist in a gui session. `export_pdf` must wait for each view's

@@ -14,9 +14,10 @@ install editable so the `fcad` console script tracks your working tree:
 uv tool install -e .
 ```
 
-`config.py` must stay pure stdlib (it is imported by every interpreter, including
-at install time). keep `import FreeCAD`/`Part`/`TechDraw` confined to
-`src/fcad/freecad/`, and numpy/matplotlib confined to `src/fcad/render/`.
+`config.py`, `cutlist.py` and `fem_select.py` must stay pure stdlib (every
+interpreter imports them, `config` even at install time). keep
+`import FreeCAD`/`Part`/`TechDraw` confined to `src/fcad/freecad/`, and
+numpy/matplotlib confined to `src/fcad/render/`.
 
 ## testing
 

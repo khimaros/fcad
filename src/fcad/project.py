@@ -21,6 +21,8 @@ made spec; a project may use its own type as long as it exposes the same surface
 
 import os
 
+from fcad.cutlist import lengths_for
+
 DEFAULT_GROUP = "Parameters"
 
 # short property-type aliases a project may write in PARAM_META instead of the
@@ -107,7 +109,7 @@ class Project:
 
     def __init__(self, name, root=None, params=None, schema=None, compute=None,
                  from_spec=None, profile=None, enum_choices=None, fem=None,
-                 param_meta=None, material=None, materials=None):
+                 param_meta=None, material=None, materials=None, stock=None):
         self.name = name              # output stem: <name>.FCStd, <name>-bom.csv
         self.root = root or os.getcwd()   # project root; dist/ is created under it
         self.params = dict(params or {})  # default parameter values
@@ -122,10 +124,17 @@ class Project:
         self.fem = fem
         self.material = material          # project-wide default fem material
         self.materials = dict(materials or {})  # project-defined named materials
+        # purchasable stock lengths per bom profile (or one list for all). which
+        # profiles appear here decides which parts the cut list plans at all.
+        self.stock = stock
 
     @property
     def dist(self):
         return os.path.join(self.root, "dist")
+
+    def stock_for(self, profile):
+        """stock lengths declared for a bom profile; [] means not cut from stock."""
+        return lengths_for(self.stock, profile)
 
     def defaults(self):
         return dict(self.params)

@@ -11,6 +11,26 @@
 
 ## done
 
+- **cut-list optimization.** the bom said how many pieces of what length but not
+  what to buy. `fcad build cutlist` now packs each profile's bom rows into the
+  stock lengths purchasable for it and writes `dist/<name>-cutlist.csv` (per cut
+  pattern: stock length, board count, pieces per board, offcut) plus a summary
+  line per profile. `src/fcad/cutlist.py` is pure stdlib and FreeCAD-free, so the
+  cli and the in-freecad builder share it: an exact dp over the demand vector
+  while the state x pattern product stays inside a fixed budget, first-fit-
+  decreasing above it, with `Plan.exact` recording which ran so a greedy plan
+  never poses as an optimum. a saw kerf is charged between adjacent cuts and an
+  optional trim allowance against each board; a piece no stock can hold is
+  reported, not dropped. stock lengths are market knowledge, so they come from an
+  optional `STOCK` project global ({profile: [lengths]} or one list for all) that
+  also decides *which* profiles are cut from stock at all — fasteners declare
+  none and are skipped — with `--stock`/`--kerf`/`--trim`/`--objective` overriding
+  per invocation for what-if runs (`--stock 2x6=8ft,12ft`, mm when unsuffixed).
+  validated on ../planter: 33 pieces of 2x6 in four distinct lengths pack into 9
+  boards at 1.3% waste. covered by `tests/test_cutlist.py` (a fixture whose
+  optimum is unique and hand-checkable, built through the real assembly builder,
+  plus kerf/trim accounting, the env overrides, oversize pieces, and the greedy
+  fallback's demand conservation).
 - **reduce per-project boilerplate: single-file projects.** a project can now be
   one file whose every line is geometry, either a directory's `project.py` or a
   standalone **`.fcad`** file (python, named directly `fcad -p planter.fcad ...` or

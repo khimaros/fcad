@@ -13,6 +13,7 @@ import sys
 import FreeCAD as App
 import Part
 
+from fcad import cutlist
 from fcad.freecad import util as fcutil
 
 # the built-in Assembly workbench ships its python modules here.
@@ -129,6 +130,43 @@ def write_bom(specs, path):
                         getattr(spec, "profile", ""), round(spec.length, 1)])
 
 
+def profile_demand(specs):
+    """{bom profile: {cut length: qty}} - the bom, keyed for the cut list."""
+    demand = {}
+    for spec in specs:
+        prof = getattr(spec, "profile", "")
+        if not prof:
+            continue
+        length = round(spec.length, 1)
+        rows_ = demand.setdefault(prof, {})
+        rows_[length] = rows_.get(length, 0) + len(spec.placements)
+    return demand
+
+
+def write_cutlist(project, specs, path):
+    """pack each profile's bom rows into the stock lengths declared for it.
+
+    a profile with no stock (fasteners, bought parts) is not cut from stock and
+    is simply absent from the plan."""
+    opts = cutlist.options_from_env()
+    override = opts.pop("stock")
+    out = []
+    for prof, demand in profile_demand(specs).items():
+        lengths = cutlist.resolve_lengths(project.stock_for(prof), override, prof)
+        if not lengths:
+            continue
+        plan = cutlist.plan(demand, lengths, **opts)
+        out.append((prof, plan))
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(cutlist.CSV_HEADER)
+        for prof, plan in out:
+            w.writerows(cutlist.rows(prof, plan))
+    for prof, plan in out:
+        for line in cutlist.summary(prof, plan):
+            print(line)
+
+
 def build_jointed_doc(project, values, data, parts_dir, path):
     """assemble <name>.FCStd as a real Assembly-workbench assembly.
 
@@ -208,6 +246,9 @@ def build(project, values, dirs, formats):
 
     if "bom" in formats:
         write_bom(specs, os.path.join(dirs["dist"], project.name + "-bom.csv"))
+    if "cutlist" in formats:
+        write_cutlist(project, specs,
+                      os.path.join(dirs["dist"], project.name + "-cutlist.csv"))
 
     neutral = formats & {"step", "stl", "svg", "dxf", "drawing"}
     if neutral:
