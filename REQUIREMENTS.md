@@ -187,6 +187,17 @@ never regress on them.
   by von Mises with a colorbar; `fem-animate [TARGET]` writes a deformation-sweep
   MP4+GIF plus one MP4+GIF per eigenmode. both run under plain python3 (no FreeCAD,
   no VTK).
+- R6.5 a solve is bounded before it can exhaust the machine. having meshed, fcad
+  estimates what a direct CalculiX solve of that node count needs and refuses -
+  non-zero, with no partial artifact, and *before* CalculiX starts - one that
+  does not fit, naming the node count, the estimate, the ceiling and what to
+  change. the mesher runs under a wall clock bound and is killed if it overruns,
+  rather than waited on forever. and every child fcad spawns runs in its own
+  session under a heap ceiling it passes to its own children, so the mesher and
+  solver FreeCAD launches are bounded too and one signal reaps all of them.
+  `FCAD_MEM` sets the ceiling and `FCAD_FEM_MESH_TIMEOUT` the wall clock. the
+  estimate is a fit and so is advisory in both directions; what this forbids is
+  a run reaching the OOM killer with nothing said.
 
 ## external requirements
 

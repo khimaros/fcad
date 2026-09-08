@@ -48,7 +48,25 @@ def placed_shapes(project, specs):
     return out
 
 
-def target_shape(project, values, target):
+def blank_shape(project, spec):
+    """a part's solid without its drilled features, from its defining profile.
+
+    a global model wants the load path, not the fastener holes, and the holes are
+    what make one unsolvable: gmsh sizes elements from curvature, so a 4 mm pilot
+    pulls the local element size to about a millimetre however coarse the ceiling
+    is. a whole fastened assembly then spends every node resolving fastener holes
+    and never finishes meshing. a spec with no 2d profile falls back to its real
+    solid."""
+    prof = project.profile(spec)
+    if prof is None:
+        return project.from_spec(spec)
+    pts, thickness = prof
+    poly = [App.Vector(x, y, -thickness / 2.0) for x, y in pts]
+    return Part.Face(Part.makePolygon(poly + [poly[0]])).extrude(
+        App.Vector(0, 0, thickness))
+
+
+def target_shape(project, values, target, undrilled=False):
     """one connected BREP solid for a FEM target (assembly or a part name).
 
     a FEM solve needs a single, connected solid. for the assembly we fuse the
@@ -56,19 +74,28 @@ def target_shape(project, values, target):
     as in find_overlaps) into one bonded body; touching boards share faces so the
     union is connected, which CalculiX linear-static treats as a rigid joint. for
     a part name we return its single solid in its natural (unplaced) frame, matching
-    how dist/parts/<name>.stl is built. returns the Part.Shape, or None if no such
-    part."""
+    how dist/parts/<name>.stl is built. `undrilled` builds every part from its
+    profile instead, dropping the holes. returns the Part.Shape, or None if no
+    such part."""
     data = project.compute(values)
     specs = data["specs"]
+    build = (lambda s: blank_shape(project, s)) if undrilled else project.from_spec
     if target in ("assembly", project.name):
-        shapes = [s for spec in specs if not getattr(spec, "embeds", False)
-                  for s in placed_shapes(project, [spec])]
+        shapes = []
+        for spec in specs:
+            if getattr(spec, "embeds", False):
+                continue
+            base = build(spec)
+            for pl in spec.placements:
+                s = base.copy()
+                s.Placement = pl
+                shapes.append(s)
         fused = shapes[0]
         for s in shapes[1:]:
             fused = fused.fuse(s)
         return fused.removeSplitter()
     spec = next((s for s in specs if s.name == target), None)
-    return project.from_spec(spec) if spec is not None else None
+    return build(spec) if spec is not None else None
 
 
 def find_overlaps(project, values, tol=1.0):

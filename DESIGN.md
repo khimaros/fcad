@@ -24,6 +24,9 @@ src/fcad/
   loader.py       load a project (a dir's project.py or a .fcad file) and return
                   its Project, declared explicitly (PROJECT) or by convention
   cutlist.py      1d bin packing of the bom into buyable stock (pure stdlib)
+  limits.py       what a child may spend: memory budget + estimate, gmsh wall
+                  clock, the inherited rlimit (pure stdlib, imported both sides)
+  _run.py         spawn the in-freecad entry: own session, inherited ceiling
   diff.py         worktree orchestration for `diff` (runs under the cli's python)
   fem_select.py   geometry-predicate face selectors for FEM (pure stdlib)
   freecad/        everything that imports FreeCAD (runs under freecadcmd/freecad)
@@ -54,7 +57,11 @@ the project/name/dist/binaries once, exports them into the environment, then:
   inserts the installed package's parent directory onto `sys.path` (so FreeCAD's
   bundled python can `import fcad`), then dispatches the command to the matching
   `fcad.freecad` handler. there is exactly one copy of the code; FreeCAD just
-  runs it through a different interpreter.
+  runs it through a different interpreter. the child is spawned into its own
+  session, so the tools *it* spawns share one process group and a single signal
+  reaps all of them - killing freecadcmd alone leaves a gmsh behind still holding
+  gigabytes. the cost of that session is the terminal's ctrl-c, which no longer
+  reaches a child outside the foreground group, so `_run.supervise` relays it.
 - **render / animate / fem-render / fem-animate**: imported and called in-process
   under the cli's own python (these are the commands with pip dependencies and no
   FreeCAD need).
@@ -99,6 +106,28 @@ the project/name/dist/binaries once, exports them into the environment, then:
   `von_mises_p95`/`p99` next to it. all three defects share a shape worth
   remembering: a plausible, confidently-reported, wrong number. that is why the
   FEM tests assert against closed-form beam theory instead of a previous run.
+
+  the fourth failure is not a wrong number but no number at all, arriving late:
+  a solve is the one fcad step whose cost is set by the mesh rather than by the
+  model, and both tools will happily consume the machine. so `limits.py` bounds
+  them in two different registers, and the split is the point. the *estimate* -
+  `ccx_bytes(nodes)` against `budget()`, checked after meshing and before
+  CalculiX starts - is the diagnostic one: it is what can name the node count and
+  say which knob to turn, and it costs seconds rather than the minutes a doomed
+  solve spends before the OOM killer reaches it. the *rlimit* is the crash
+  barrier: it cannot explain anything, but it is inherited, which is the only
+  reason it reaches gmsh and ccx at all - they are grandchildren FreeCAD spawns,
+  not children fcad does. that inheritance also fixes the ceiling's floor. it
+  must clear what the toolchain reserves before doing any work (OpenBLAS maps a
+  buffer pool up front and RLIMIT_DATA counts untouched mappings: 2.29 GiB of
+  VmData against 0.03 GiB resident on a 1671-node solve), or the ceiling stops
+  bounding runaways and starts stopping FreeCAD from starting. the mesher gets a
+  wall clock instead of an estimate, because its cost is not knowable from
+  anything fcad holds before it runs; bounding it means running gmsh through
+  `GmshTools`' granular seam - `prepare`/`compute`/`waitForFinished` - rather
+  than `create_mesh()`, which waits forever and reports failure only by leaving
+  the mesh empty. the same granular-seam argument as the solver, for the same
+  reason.
 
 - **api-docs**: the one headless command that loads no project, because it
   documents the *toolchain* rather than a model. it runs under `freecadcmd`

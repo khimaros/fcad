@@ -264,7 +264,22 @@ for the script name.
   library has steels/aluminums/plastics with FEM properties but **no structural
   wood** card. read a card via
   `Materials.MaterialManager().getMaterial(uuid).Properties` and copy it onto
-  `mat.Material`, or set `{E,nu,rho}` yourself for wood.
+  `mat.Material`, or set `{E,nu,rho}` yourself for wood. (6) **neither tool is
+  bounded by default.** `GmshTools.create_mesh()` is `run(True)`, whose wait is
+  `QProcess.waitForFinished(-1)` - forever - and a mesher that failed reports it
+  only by leaving `FemMesh` empty; gmsh has run 14 minutes at 7.6 GB on a
+  fastened assembly without finishing. use the granular seam instead
+  (`prepare()`, `compute()` returns the `QProcess`, `waitForFinished(ms)`,
+  `kill()`), the same way the solver is driven. CalculiX is worse because it does
+  finish, on a bigger machine: peak RSS measured on a 2nd-order steel cantilever
+  goes 26 MB at 1671 nodes to 2.25 GB at 100855, which is `~500 * nodes^(4/3)`
+  bytes and not linear - a direct sparse factorization's fill-in. estimate it
+  before running ccx (`fem._preflight`); it has been OOM-killed at exit -9 three
+  times in one session. when bounding either with an rlimit, note that
+  `RLIMIT_DATA` counts untouched mappings and OpenBLAS reserves a buffer pool up
+  front - 2.29 GiB of VmData against 0.03 GiB resident on the smallest solve,
+  constant, and unaffected by thread count - so a ceiling under ~3 GiB stops
+  FreeCAD starting at all rather than stopping anything from running away.
 - **gui-only:** `obj.ViewObject` (colors), Draft layers, anything in
   `*Gui` modules. guard with `if App.GuiUp:`. `freecadcmd` is headless.
 - disable `.FCBak` clutter: set `Preferences/Document/CountBackupFiles = 0`.

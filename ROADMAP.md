@@ -11,6 +11,36 @@
 
 ## done
 
+- **a solve can no longer take the machine with it.** `fcad fem` was the one
+  command that failed by exhaustion: gmsh ran 14 minutes at 7.6 GB on a fastened
+  assembly without finishing, and CalculiX was OOM-killed (exit -9) three times
+  in one session at 282k-551k nodes, driving a 64 GB desktop under 1 GB free
+  first - one of those cases having solved twice earlier the same session, which
+  is the tell that the limit is the machine's free memory and not the model.
+  three bounds now, in decreasing order of how much they can explain. **the
+  preflight** estimates a direct solve from the node count and refuses one that
+  will not fit before ccx starts, naming the count, the estimate, the ceiling and
+  which knob to turn: 1.1 s and a sentence, against four minutes and an exit code
+  of -9. the estimate is measured rather than guessed - peak ccx RSS over six
+  mesh sizes on a 2nd-order steel cantilever, 26 MB at 1671 nodes to 2.25 GB at
+  100855, which fits `500 * nodes^(4/3)` to +-2% above 20k nodes and independently
+  predicts 8.6 GB for the 282k-node solve that died on a machine with ~10 GB
+  free. **a wall clock** on the mesher, whose cost nothing knows before it runs
+  (`FCAD_FEM_MESH_TIMEOUT`, default 900 s), which needed gmsh to be driven
+  through `GmshTools`' granular seam rather than `create_mesh()` - that one waits
+  `waitForFinished(-1)`, forever, and reports a failed mesh only by leaving it
+  empty, so the failure used to resurface minutes later as a CalculiX complaint
+  about a model that was never meshed. **an inherited rlimit** as the crash
+  barrier, because the processes that get big are grandchildren FreeCAD spawns:
+  it is the one mechanism that reaches them. the sharp edge there is that
+  `RLIMIT_DATA` counts untouched mappings and OpenBLAS reserves its buffer pool
+  up front (2.29 GiB of VmData against 0.03 GiB resident at 1671 nodes, constant
+  with problem size and with thread count), so a ceiling set to the budget alone
+  stops FreeCAD from starting rather than stopping a runaway - the first cut did
+  exactly that, turning `FCAD_MEM=1M` into exit 127. children also get their own
+  session now, so one signal reaps the mesher and solver with them; killing
+  freecadcmd by pid used to leave a gmsh behind still holding 7.6 GB. frozen as
+  R6.5.
 - **partial supports, so a beam is not clamped at both ends.** a case may now
   declare `supports=[dict(faces=[...], fix="yz"), ...]` beside `fixed`,
   restraining only the named translation axes via `makeConstraintDisplacement`.
@@ -22,14 +52,26 @@
   least carries the right `wL^2/8`. (the property names came straight out of
   `api-docs`, which is the reason it exists: `xFree`/`yFree`/`zFree` appear
   nowhere in the wiki.)
+- **`undrilled`, which is what makes a whole-assembly solve possible.** a case
+  may build its parts from their 2d profiles instead of their drilled solids.
+  gmsh sizes elements from curvature (`MeshSizeFromCurvature`, 12 per turn by
+  default), so every 4 mm pilot hole demands ~1 mm elements however coarse the
+  ceiling: the planter's fused box has 649 drilled faces and spent 14 minutes
+  and 7.6 GB without finishing a mesh. undrilled it meshes in seconds (173k
+  nodes) and solves in 45 s. `mesh_curvature`/`mesh_min` expose the underlying
+  knobs, with the caveat that a hole below the resulting element size cannot be
+  meshed at all and gmsh returns nothing rather than a coarser hole - which is
+  why turning curvature *down* is not the fix it looks like.
 - **`fem all`, and percentiles beside the peak.** `fcad fem all` works through
   every case a project declares rather than one target per invocation. the npz
   gained `von_mises_p95`/`p99`: the nodal maximum always lands on a singularity
   -- a clamped face, the sharp internal corner of a notch or a drilled hole --
   where linear elasticity has no finite answer, so it reports the mesh rather
-  than the part. a notched planter floor board reads 110.6 MPa at its worst node
-  and 6.31 at p95; a mesh reseed swung one runner's maximum from 1015 to 10.9
-  between two runs while its p95 moved from 7.7 to 4.0.
+  than the part. a notched planter floor board reads 205.8 MPa at its worst node
+  and 5.18 at p95; a mesh reseed swung one runner's maximum from 1015 to 10.9
+  between two runs while its p95 moved only from 7.7 to 4.0. p95 is a floor on
+  the field stress, not a peak: on a clamped model the moment maximum sits at
+  the constrained end, which is exactly what the percentile throws away.
 - **`api-docs`: a build-accurate FreeCAD api reference.** `fcad api-docs [DIR]`
   writes `index/typeids/factories/fem/properties.md` for the *installed* build by
   instantiating real objects and reading `PropertiesList` /

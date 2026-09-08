@@ -252,9 +252,11 @@ the bundle carries `von_mises_p95`/`von_mises_p99` beside `von_mises`. reach for
 those first: the nodal maximum lands on whatever singularity the model contains
 -- a clamped face, the sharp internal corner of a notch or a drilled hole --
 where linear elasticity has no finite answer, so it reports the mesh rather than
-the part. a notched planter floor board reads 110.6 MPa at its worst node and
-6.31 at p95, and a mesh reseed has swung a maximum by two orders of magnitude
-while its p95 stayed put.
+the part. a notched planter floor board reads 205.8 MPa at its worst node and
+5.18 at p95, and a mesh reseed has swung a maximum by two orders of magnitude
+while its p95 stayed put. read p95 as a floor on the field stress rather than a
+peak, though: on a clamped model the moment peaks at the constrained end, and
+those nodes are precisely what a percentile discards.
 
 the mesh is second-order, which matters more than it sounds: the 4-node tets
 FreeCAD meshes with by default are over-stiff in bending and understate deflection
@@ -291,6 +293,48 @@ still out of reach -- clamp one end, roller the other, and a uniformly loaded
 beam at least carries the right peak moment. `gravity` is a direction in the
 part's own stock frame, which is the frame a single part solves in: a member the
 assembly stands on edge does not see `-Z` as down.
+
+`undrilled=True` builds every part from its 2d profile instead of its real
+solid, dropping the fastener and drainage holes. that is usually the difference
+between a whole-assembly model solving and not: gmsh sizes elements from
+curvature, so a 4 mm pilot hole pulls the local element size to about a
+millimetre however coarse `mesh_size` is, and a fastened assembly can spend
+every node resolving fastener holes and never finish meshing. `mesh_curvature`
+and `mesh_min` tune that directly when you want the holes but less of them --
+though note that a hole smaller than the resulting element size cannot be meshed
+at all, and gmsh then returns nothing rather than a coarse hole.
+
+be honest about what an assembly solve means: fcad fuses the parts into one
+bonded body, so every joint becomes a weld. on the planter that reads about ten
+times stiffer than the real screwed frame -- 0.29 mm of deflection against the
+2.77 mm its worst single member shows under the same load. it is a picture of
+load flow, not a number to size against.
+
+a solve will not take the machine with it. CalculiX factors the stiffness matrix
+directly, so its memory grows as about nodes^(4/3) -- halving `mesh_size` costs
+ten times the RAM -- and an unbounded run reaches the OOM killer several minutes
+in, having driven everything else into reclaim first. so fcad estimates the solve
+from the node count and refuses one that will not fit *before* CalculiX starts:
+
+```
+$ fcad fem floor_slat
+fcad fem: 'floor_slat' would need about 21G to solve and 9.58G is available
+(551204 nodes at mesh_size 8). CalculiX factors the stiffness matrix directly,
+so memory grows as nodes^(4/3) and halving mesh_size costs about ten times the
+RAM: raise mesh_size; set mesh_curvature/mesh_min if drilled holes are driving
+the element count, since gmsh refines on curvature independently of mesh_size;
+or undrilled=True to drop the holes. or raise the ceiling with FCAD_MEM=21G if
+the machine really has it.
+```
+
+that takes seconds rather than the four minutes the solve would have spent dying.
+gmsh is bounded the other way, by wall clock (`FCAD_FEM_MESH_TIMEOUT`, default
+900s), since a mesh chasing curvature through a few dozen fastener holes runs for
+a quarter of an hour at gigabytes and produces nothing. `FCAD_MEM` sets the
+ceiling for both -- it is also installed as an rlimit on every child, which the
+mesher and solver inherit, so a runaway hits a wall of its own instead of the
+kernel's. the estimate is a fit, so raise the ceiling if your machine really has
+the memory; what fcad will not do is find out by being killed.
 
 without a `FEM` descriptor a target still solves under a default (fix the base,
 self-weight, a steel card). needs `gmsh` + `ccx` on `PATH`.

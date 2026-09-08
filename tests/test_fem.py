@@ -28,7 +28,7 @@ import Part
 from types import SimpleNamespace
 
 from fcad import fem_select as fs
-from fcad.freecad import fem
+from fcad.freecad import build_assembly, fem
 
 
 # the cantilever: steel, fixed at its -x end, slender enough (L/h = 15) that
@@ -39,6 +39,7 @@ BEAM_MESH = 10.0                    # coarse on purpose: 2nd-order tets earn it
 BEAM_TOL = 0.05
 TOP_PRESSURE = 0.1                  # MPa, uniformly on the top face
 TIP_FORCE = 500.0                   # N, -z on the +x end face
+HOLE_R = 2.0                        # a 4mm pilot, the feature `undrilled` drops
 
 
 class _Spec:
@@ -52,15 +53,19 @@ class _Project:
 
     name = "tfem"
 
-    def __init__(self, case, shape=None):
+    def __init__(self, case, shape=None, profile=None):
         self.fem = {"box": case}
         self._shape = shape or (lambda: Part.makeBox(100, 20, 10))
+        self._profile = profile
 
     def compute(self, values):
         return {"specs": [_Spec()]}
 
     def from_spec(self, spec):
         return self._shape()
+
+    def profile(self, spec):
+        return self._profile
 
     def defaults(self):
         return {}
@@ -119,8 +124,7 @@ def _watertight(tris):
     return all(n % 2 == 0 for n in ec.values())
 
 
-def _solve_checks():
-    out = _solve(_Project(_box_case()))
+def _solve_checks(out):
     n = len(out["nodes"])
     tris = out["tris"]
     return [
@@ -177,8 +181,117 @@ def _cantilever_checks():
     ]
 
 
+def _held(**held):
+    """the beam under the same uniform pressure, held however the case says."""
+    return SimpleNamespace(
+        material=STEEL, loads=[SimpleNamespace(
+            kind="pressure", faces=fs.max_along("z"), magnitude=TOP_PRESSURE)],
+        self_weight=False, mesh_size=BEAM_MESH, modes=0, **held)
+
+
+def _support_checks():
+    """R6.2: `supports` restrains only the axes it names.
+
+    a fully fixed face is a clamp - every node pinned, so it cannot rotate - and
+    holding a beam that way at both ends reads far stiffer than one resting on
+    its bearings. the failure this guards is silent: were `fix` ignored and every
+    axis pinned, the roller would simply solve as a second clamp and report a
+    plausible number. so it is checked as an ordering, which is the part beam
+    theory is unambiguous about, rather than against a closed form no whole-face
+    restraint actually matches."""
+    beam = lambda: Part.makeBox(*BEAM)
+    ends = [fs.min_along("x"), fs.max_along("x")]
+    clamped, _ = _tip(_solve(_Project(_held(fixed=ends), beam)))
+    rolled, _ = _tip(_solve(_Project(_held(
+        fixed=[ends[0]], supports=[{"faces": [ends[1]], "fix": "yz"}]), beam)))
+    free, _ = _tip(_solve(_Project(_held(fixed=[ends[0]]), beam)))
+    return [
+        ("a rolled end is softer than a clamped one (%.4f vs %.4f mm)"
+         % (rolled, clamped), rolled > clamped * 1.5),
+        ("and stiffer than no support at all (%.4f vs %.4f mm)" % (rolled, free),
+         rolled < free),
+    ]
+
+
+def _drilled():
+    """the beam with a hole through its thickness, and the 2d profile that
+    describes it without one. the profile is the part's *mid-plane* section, the
+    same convention `_defining_sketch` places its sketch on, so an undrilled
+    rebuild has to land in the same frame as the solid it replaces."""
+    length, width, height = BEAM
+    pts = [(0.0, 0.0), (length, 0.0), (length, width), (0.0, width)]
+    hole = Part.makeCylinder(HOLE_R, height * 2, App.Vector(
+        length / 2.0, width / 2.0, -height))
+    box = Part.makeBox(length, width, height, App.Vector(0, 0, -height / 2.0))
+    return (lambda: box.cut(hole)), (pts, height)
+
+
+def _undrilled_checks():
+    """R6.2: `undrilled` drops the holes without moving the part.
+
+    a whole fastened assembly is unmeshable drilled - gmsh refines on curvature,
+    so every pilot hole demands elements a fraction of its diameter - and the
+    escape is to solve the blank. the risk it carries is that the blank is built
+    from a different description than the solid, so this pins the frames
+    together: same bounding box, more material, fewer faces."""
+    shape, profile = _drilled()
+    project = _Project(_box_case(), shape, profile)
+    kept = build_assembly.target_shape(project, {}, "box")
+    blank = build_assembly.target_shape(project, {}, "box", undrilled=True)
+    box = lambda s: [round(v, 6) for v in
+                     (s.BoundBox.XMin, s.BoundBox.YMin, s.BoundBox.ZMin,
+                      s.BoundBox.XMax, s.BoundBox.YMax, s.BoundBox.ZMax)]
+    return [
+        ("undrilled occupies the same space as the drilled part",
+         box(blank) == box(kept)),
+        ("undrilled has the hole's material back",
+         blank.Volume > kept.Volume * 1.0001),
+        ("undrilled has fewer faces to refine on",
+         len(blank.Faces) < len(kept.Faces)),
+        ("a part with no 2d profile falls back to its real solid",
+         abs(build_assembly.target_shape(_Project(_box_case(), shape), {}, "box",
+                                         undrilled=True).Volume - kept.Volume)
+         < 1e-6),
+    ]
+
+
+def _mesh_limit_checks():
+    """R6.2: `mesh_min`/`mesh_curvature` reach the gmsh properties they name.
+
+    both are the escape hatch when the holes must stay, and both fail silently if
+    the property name is wrong - the mesh simply comes back as it always did."""
+    mesh = SimpleNamespace(CharacteristicLengthMin=None, MeshSizeFromCurvature=12)
+    fem._mesh_limits(mesh, {"mesh_min": 2.5, "mesh_curvature": 0})
+    default = SimpleNamespace(CharacteristicLengthMin=None,
+                              MeshSizeFromCurvature=12)
+    fem._mesh_limits(default, {})
+    return [
+        ("mesh_min sets the element floor", mesh.CharacteristicLengthMin == 2.5),
+        ("mesh_curvature=0 stops the curvature chase",
+         mesh.MeshSizeFromCurvature == 0),
+        ("a case declaring neither leaves gmsh's own curvature default alone",
+         default.MeshSizeFromCurvature == 12),
+    ]
+
+
+def _percentile_checks(out):
+    """R6.1: the percentiles the npz carries beside the peak are ordered and
+    real. the peak itself sits on a singularity and reports the mesh."""
+    vm = out["von_mises"]
+    return [
+        ("von Mises p95 <= p99 <= max",
+         0.0 < float(out["von_mises_p95"]) <= float(out["von_mises_p99"])
+         <= float(vm.max())),
+        ("p95 discards the singular tail",
+         float(out["von_mises_p95"]) < float(vm.max())),
+    ]
+
+
 def main():
-    checks = _selector_checks() + _solve_checks() + _cantilever_checks()
+    box = _solve(_Project(_box_case()))
+    checks = (_selector_checks() + _solve_checks(box) + _cantilever_checks()
+              + _percentile_checks(box) + _support_checks()
+              + _undrilled_checks() + _mesh_limit_checks())
     failed = [name for name, ok in checks if not ok]
     lines = ["%s %s" % ("ok  " if ok else "FAIL", name) for name, ok in checks]
     lines.append("RESULT %s" % ("PASS" if not failed else "FAIL"))
