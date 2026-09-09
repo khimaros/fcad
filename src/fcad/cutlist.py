@@ -297,16 +297,47 @@ def parse_stock(text):
     return plain
 
 
+def _length_of(entry):
+    """a stock entry's length, whether or not it carries a price.
+
+    an entry is either a bare length or `(length, price)`, so a project can
+    price its stock without changing anything that only wants the lengths."""
+    if isinstance(entry, (tuple, list)):
+        return float(entry[0])
+    return float(entry)
+
+
+def _price_of(entry):
+    return float(entry[1]) if isinstance(entry, (tuple, list)) and len(entry) > 1 \
+        else None
+
+
 def lengths_for(stock, profile):
     """stock lengths declared for one bom profile.
 
     a dict is looked up by profile name, with "*" as the catch-all entry; a bare
-    list applies to every profile."""
+    list applies to every profile. prices, where an entry carries one, are
+    stripped here: everything downstream plans on lengths."""
+    return [_length_of(e) for e in _entries_for(stock, profile)]
+
+
+def _entries_for(stock, profile):
+    """the raw stock entries for a profile, prices intact."""
     if not stock:
         return []
     if isinstance(stock, dict):
         return list(stock.get(profile) or stock.get("*") or [])
     return list(stock)
+
+
+def prices_for(stock, profile):
+    """{length: price} for a profile, empty when the project prices nothing."""
+    out = {}
+    for entry in _entries_for(stock, profile):
+        price = _price_of(entry)
+        if price is not None:
+            out[_length_of(entry)] = price
+    return out
 
 
 def resolve_lengths(declared, override, profile):
@@ -368,3 +399,33 @@ def summary(profile, plan_):
         lines.append("  %s: WARNING %d x %g mm exceeds every stock length"
                      % (profile, qty, length))
     return lines
+
+
+def totals(plans, prices=None):
+    """the line a person actually wants: what the whole model costs to buy.
+
+    per-profile summaries answer "how do I cut the 2x6"; nobody's shopping list
+    is one profile. purchased length leads because board count is only a proxy
+    for cost -- a 16 ft board is not one 8 ft board -- and waste *percentage* is
+    worse than either: a model can buy less total timber at a higher percentage.
+
+    `plans` is {profile: Plan}; `prices` the optional {profile: {length: price}}
+    a priced `STOCK` yields."""
+    boards = sum(p.board_count for p in plans.values())
+    bought = sum(p.bought for p in plans.values())
+    waste = sum(p.waste for p in plans.values())
+    pct = 100.0 * waste / bought if bought else 0.0
+    line = ("  total: %d board(s), %.0f mm purchased, %.0f mm waste (%.1f%%)"
+            % (boards, bought, waste, pct))
+    money = 0.0
+    priced = True
+    for profile, plan_ in plans.items():
+        table = (prices or {}).get(profile) or {}
+        for b in plan_.boards:
+            if b.stock in table:
+                money += table[b.stock] * b.count
+            else:
+                priced = False
+    if priced and money:
+        line += ", %.2f to buy" % money
+    return [line]

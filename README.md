@@ -57,7 +57,9 @@ grounded=..., embeds=...)` is the ready-made part: `solid` is a thunk returning
 its BREP solid, `profile2d` an optional `(points, thickness)` for the defining
 sketch, `profile` the bom label, `grounded` anchors it in the assembly, `embeds`
 excludes a part that sinks into others (e.g. screws) from the interference
-check. a project may instead return its own duck-typed spec exposing the same
+check - and puts it under the seating check instead, which asks the question
+that exclusion would otherwise leave unasked: does it actually sit in a hole cut
+for it? a project may instead return its own duck-typed spec exposing the same
 surface, and/or hand fcad an explicit `PROJECT = fcad.Project(...)`; the explicit
 form is fully supported.
 
@@ -77,9 +79,15 @@ fcad build [TARGET ...]   build/export into dist/ (no target = all); TARGET:
                              parts assembly step stl svg dxf drawings sketches
                              bom cutlist
                           cutlist knobs: --stock/--kerf/--trim/--objective
-fcad check                interference + every component constrained
-                             + every sketch fully constrained
+fcad check                the project's CONSTRAINTS, interference, and the
+                             absences an overlap test cannot see: fasteners that
+                             fit no hole, parts nothing holds up, cuts larger
+                             than the joint they relieve, holes never bored,
+                             parts severed by their own joinery
 fcad precommit            build all, then check
+fcad test [PATH ...]      run tests/test_*.py, judged by the verdict each wrote
+fcad optimize P [P ...]   sweep parameters for a cheaper cut list, refusing any
+                             candidate that breaks a CONSTRAINT
 fcad view [parts]         open the assembly in the gui (or `view parts` for the
                              part files; --part NAME for a single one)
 fcad render [TARGET]      offscreen png of a built stl

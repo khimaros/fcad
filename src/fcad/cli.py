@@ -23,6 +23,13 @@ from fcad.render import CAMERAS, FEM_SECONDS, MESH_SUBJECTS, ORDERS, SUBJECTS
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
                  "drawings", "sketches", "bom", "cutlist"]
 
+# `optimize` defaults: a grid this wide at this step is a few hundred candidates
+# on two parameters, which is seconds of work, and dimensions that pack better
+# are usually a stock length away rather than a redesign away.
+OPTIMIZE_SPAN = 60.0
+OPTIMIZE_STEP = 10.0
+OPTIMIZE_LIMIT = 10
+
 # the agent skills fcad ships, installed into a claude skills directory. `fcad`
 # is fcad's own contract; `freecad-python` is the FreeCAD api underneath it and
 # is the only one carrying a generated, build-specific reference.
@@ -74,6 +81,28 @@ def _build_parser():
                         "fewest boards")
     sub.add_parser("check", help="interference + constraint validation")
     sub.add_parser("precommit", help="build all, then check")
+
+    t = sub.add_parser("test", help="run a project's end-to-end tests")
+    t.add_argument("tests", nargs="*",
+                   help="test files or directories (default: ./tests)")
+
+    # optimize runs in the cli's own python: it drives compute() and the cutlist
+    # solver and never touches the kernel, so a whole sweep is one process.
+    o = sub.add_parser("optimize", help="sweep parameters for a cheaper cutlist")
+    o.add_argument("params", nargs="+",
+                   help="numeric PARAMS names to vary, e.g. outer_len outer_wid")
+    o.add_argument("--span", type=float, default=OPTIMIZE_SPAN,
+                   help="how far either side of each current value to look "
+                        "(default %g)" % OPTIMIZE_SPAN)
+    o.add_argument("--step", type=float, default=OPTIMIZE_STEP,
+                   help="grid step (default %g)" % OPTIMIZE_STEP)
+    o.add_argument("--limit", type=int, default=OPTIMIZE_LIMIT,
+                   help="how many candidates to print (default %d)"
+                        % OPTIMIZE_LIMIT)
+    o.add_argument("--kerf", type=float, help="cutlist saw kerf")
+    o.add_argument("--trim", type=float, help="cutlist trim allowance")
+    o.add_argument("--objective", choices=["length", "boards"],
+                   help="cutlist goal for each candidate's plan")
 
     v = sub.add_parser("view", help="open the assembly (or 'view parts') in the gui")
     v.add_argument("what", nargs="?", choices=["parts"], metavar="[parts]")
@@ -311,6 +340,68 @@ def _cutlist_env(args):
     return {k: v for k, v in given if v}
 
 
+def _test(cfg, paths):
+    """run each project test under freecadcmd and judge it by its verdict file.
+
+    the exit status cannot be trusted -- freecadcmd exits 0 on an uncaught
+    exception -- and neither can stdout, which it discards when a script exits
+    non-zero and which is block-buffered off a terminal anyway. so every test
+    writes `RESULT PASS` to `$RESULT_FILE` (see `fcad.testing`) and this reads
+    that. a test that produces no verdict at all failed."""
+    import glob
+    import subprocess
+    import tempfile
+
+    wanted = paths or [os.path.join(cfg.project or ".", "tests")]
+    files = []
+    for p in wanted:
+        if os.path.isdir(p):
+            files.extend(sorted(glob.glob(os.path.join(p, "test_*.py"))))
+        else:
+            files.append(p)
+    if not files:
+        print("fcad test: no tests found in %s" % ", ".join(wanted),
+              file=sys.stderr)
+        return 2
+
+    rc = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        result = os.path.join(tmp, "result.txt")
+        for path in files:
+            print("== %s" % path)
+            if os.path.exists(result):
+                os.remove(result)
+            env = {**os.environ, **cfg.env(), "RESULT_FILE": result}
+            subprocess.run([cfg.freecad, path], env=env,
+                           capture_output=True, text=True)
+            verdict = ""
+            if os.path.exists(result):
+                with open(result) as f:
+                    verdict = f.read()
+            if verdict:
+                print(verdict, end="" if verdict.endswith("\n") else "\n")
+            if "RESULT PASS" not in verdict:
+                if not verdict:
+                    print("  no verdict written: the test crashed before it "
+                          "could report (freecadcmd exits 0 on error)")
+                rc = 1
+    return rc
+
+
+def _optimize_env(args):
+    """export the sweep's knobs for the in-freecad driver to read back.
+
+    the sweep is pure stdlib and never touches the kernel, but loading a project
+    means importing its module and a project module imports `Part` -- so it runs
+    on the headless path like build and check do."""
+    given = (("FCAD_OPT_PARAMS", ",".join(args.params)),
+             ("FCAD_OPT_SPAN", args.span), ("FCAD_OPT_STEP", args.step),
+             ("FCAD_OPT_LIMIT", args.limit), ("FCAD_OPT_KERF", args.kerf),
+             ("FCAD_OPT_TRIM", args.trim),
+             ("FCAD_OPT_OBJECTIVE", args.objective))
+    return {k: str(v) for k, v in given if v is not None}
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -329,6 +420,10 @@ def main(argv=None):
         return rc
     if cmd in ("check", "precommit"):
         return run_entry(cfg, [cmd])
+    if cmd == "optimize":
+        return run_entry(cfg, ["optimize"], env_extra=_optimize_env(args))
+    if cmd == "test":
+        return _test(cfg, args.tests)
     if cmd == "view":
         if args.what == "parts":
             return run_entry(cfg, ["view-parts"], gui=True,

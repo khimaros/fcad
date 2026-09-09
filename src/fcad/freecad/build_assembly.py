@@ -20,6 +20,28 @@ from fcad.freecad import util as fcutil
 ASSEMBLY_MOD = "/usr/share/freecad/Mod/Assembly"
 JOINT_FIXED = 0  # index into JointObject.JointTypes
 
+# how far an `embeds` part is shifted to ask what is holding it, and how many of
+# the six directions have to answer. a through bore captures four, a blind hole
+# five, a part merely lying on a face one. the nudge has to clear the fit
+# allowance a real hole is bored with (a millimetre of clearance on a pilot is
+# usual) or a properly seated fastener reads as loose.
+NUDGE = 1.5
+MIN_CAPTURE = 3
+# how far a part is dropped to ask what is under it.
+DROP = 2.0
+# a void is judged as a fraction of the part's own blank, because real
+# clearances scale with the part and a mistake does not: the planter's grooved
+# corner post carries 0.2% in deliberate fit allowance, while a corner relieved
+# across the full width of members that only crossed over a small square carried
+# 7%. the same absolute number could not separate those.
+VOID_BUDGET = 0.01
+# how much of its own defining outline a part may lose to joinery before the
+# sketch stops describing it. drilled features run to a fraction of a percent.
+SKETCH_DRIFT = 0.05
+# tolerance for "is this point still solid": a bored hole leaves its centre in
+# free space by at least its own radius, so this only has to beat rounding.
+HOLE_TOL = 0.01
+
 V = App.Vector
 # the assembly drawing sheet uses the same projection-aligned grid as the parts:
 # top above front, right beside it, isometric in the free cell. each view has an
@@ -98,21 +120,57 @@ def target_shape(project, values, target, undrilled=False):
     return build(spec) if spec is not None else None
 
 
-def find_overlaps(project, values, tol=1.0):
+class Model:
+    """every instance placed once, so the checks below share the boolean work.
+
+    each of them is O(instances^2) in shape booleans, and a fastened assembly
+    runs to a couple of hundred instances, so building the solids four times
+    over is the difference between a check that is run and one that is not."""
+
+    def __init__(self, project, values):
+        self.project = project
+        self.specs = project.compute(values)["specs"]
+        self.structural, self.embedded = [], []
+        self._blank = {}
+        for spec in self.specs:
+            base = project.from_spec(spec)
+            into = self.embedded if getattr(spec, "embeds", False) \
+                else self.structural
+            for i, pl in enumerate(spec.placements):
+                s = base.copy()
+                s.Placement = pl
+                into.append(("%s_%03d" % (spec.name, i + 1), spec, s))
+
+    def blank(self, spec, placement):
+        """the part before its drilled features, placed. cached per part."""
+        if spec.name not in self._blank:
+            self._blank[spec.name] = blank_shape(self.project, spec)
+        s = self._blank[spec.name].copy()
+        s.Placement = placement
+        return s
+
+    def hit(self, shape, skip=None, tol=1.0):
+        """(name, volume) of the worst structural solid `shape` runs into."""
+        worst, who = 0.0, None
+        for name, _, other in self.structural:
+            if name == skip or not shape.BoundBox.intersect(other.BoundBox):
+                continue
+            try:
+                vol = shape.common(other).Volume
+            except Exception:
+                vol = 0.0
+            if vol > worst:
+                worst, who = vol, name
+        return who, worst
+
+
+def find_overlaps(project, values, tol=1.0, model=None):
     """structural solids whose volumes interpenetrate (touching faces give zero
     common volume, so only real interference is reported). parts flagged
     `embeds` (e.g. screws, which intentionally sink into the wood) are excluded.
     returns (name_a, name_b, mm^3)."""
-    data = project.compute(values)
-    solids = []
-    for spec in data["specs"]:
-        if getattr(spec, "embeds", False):
-            continue
-        base = project.from_spec(spec)
-        for i, pl in enumerate(spec.placements):
-            s = base.copy()
-            s.Placement = pl
-            solids.append(("%s_%03d" % (spec.name, i + 1), s))
+    model = model or Model(project, values)
+    solids = [(n, s) for n, _, s in model.structural]
     hits = []
     for i, (ni, si) in enumerate(solids):
         for nj, sj in solids[i + 1:]:
@@ -125,6 +183,202 @@ def find_overlaps(project, values, tol=1.0):
             if vol > tol:
                 hits.append((ni, nj, vol))
     return hits
+
+
+def find_unseated(project, values, tol=1.0, nudge=NUDGE, model=None):
+    """`embeds` parts that are not sitting in a cavity cut for them.
+
+    `embeds` drops a part from `find_overlaps` precisely because it is meant to
+    sink into other solids -- so the parts fcad stops checking are exactly the
+    ones whose whole job is to fit a hole. this is the compensating check, and
+    it asserts the two things the flag itself cannot:
+
+    - **it must not plough through material.** a fastener seated in its bore
+      displaces nothing; one turned at right angles to that bore, or driven into
+      a slot that was never cut, interpenetrates the receiver just as surely as
+      any interference -- and `embeds` is what stops anything noticing. this is
+      the failure worth having the check for: it renders and exports perfectly.
+    - **it must be held by something.** nudged along each axis it has to meet a
+      structural solid from at least `MIN_CAPTURE` directions. a through bore
+      captures four, a blind hole five, a part lying on a face one, and a part
+      floating in mid-air none.
+
+    the second is a heuristic and the first is not, so they are reported apart.
+    returns (instance, reason, detail)."""
+    model = model or Model(project, values)
+    if not model.embedded or not model.structural:
+        return []
+    hit = model.hit
+
+    bad = []
+    for name, _, s in model.embedded:
+        who, vol = hit(s)
+        if vol > tol:
+            bad.append((name, "interferes",
+                        "%.1f mm^3 into %s" % (vol, who)))
+            continue
+        held = 0
+        for axis in (V(nudge, 0, 0), V(-nudge, 0, 0), V(0, nudge, 0),
+                     V(0, -nudge, 0), V(0, 0, nudge), V(0, 0, -nudge)):
+            moved = s.copy()
+            moved.Placement = App.Placement(s.Placement.Base + axis,
+                                            s.Placement.Rotation)
+            if hit(moved)[1] > tol:
+                held += 1
+        if held < MIN_CAPTURE:
+            bad.append((name, "unseated",
+                        "captured from %d of 6 directions" % held))
+    return bad
+
+
+def find_disjoint(project, values, model=None):
+    """parts whose own joinery has cut them into more than one piece.
+
+    a mortise from one direction meeting a housing from another inside the same
+    post severs it, and the result is still a valid shape, still exports, still
+    renders as two pieces sitting exactly where one used to be. returns
+    (part, n_solids)."""
+    model = model or Model(project, values)
+    seen, bad = set(), []
+    for _, spec, solid in model.structural + model.embedded:
+        if spec.name in seen:
+            continue
+        seen.add(spec.name)
+        n = len(solid.Solids)
+        if n != 1:
+            bad.append((spec.name, n))
+    return bad
+
+
+def find_voids(project, values, budget=VOID_BUDGET, model=None):
+    """parts that give up material nothing else occupies.
+
+    two members that cross need exactly one of them to give way, over exactly
+    the volume they share; relieve more than that and the surplus is an empty
+    pocket inside the assembly. it passes every other check -- a void is the
+    opposite of an overlap -- and shows up in a render only as a shadow.
+
+    a part is compared against its own `profile2d` blank, so only projects that
+    declare one are examined; the tolerance is a fraction of that blank, because
+    real clearances (a groove ploughed wide, a blind mortise cut deep) scale
+    with the part while a mistake does not. returns (part, void_mm3, fraction)."""
+    model = model or Model(project, values)
+    seen, bad = set(), []
+    for name, spec, solid in model.structural:
+        if spec.name in seen:
+            continue
+        seen.add(spec.name)
+        blank = model.blank(spec, solid.Placement)
+        removed = blank.Volume - solid.Volume
+        if removed <= 0:
+            continue                      # nothing cut, or no distinct blank
+        filled = 0.0
+        for other_name, _, other in model.structural + model.embedded:
+            if other_name == name or not blank.BoundBox.intersect(other.BoundBox):
+                continue
+            try:
+                filled += blank.common(other).Volume
+            except Exception:
+                pass
+        void = removed - filled
+        frac = void / blank.Volume if blank.Volume else 0.0
+        if frac > budget:
+            bad.append((spec.name, void, frac))
+    return bad
+
+
+def find_unsupported(project, values, drop=DROP, tol=1.0, model=None):
+    """parts that nothing holds up.
+
+    every piece in an assembly is carried by something: it is `grounded`, it
+    rests on another part, or a fastener passes through it. drop it and see. the
+    failure this exists for is a housing cut to the full depth of the member it
+    receives, which comes out as a slot open at the bottom -- the part fills it
+    exactly, overlaps nothing, and rests on nothing.
+
+    a part with an `embeds` part through it is taken as fastened and exempt,
+    which is what keeps this meaningful for screwed models as well as for
+    gravity-stacked ones. that test is against the part's *blank*: a correctly
+    drilled part shares no volume at all with the fastener in its hole, so
+    comparing against the drilled solid would find every properly made joint
+    unfastened and every botched one fine.
+
+    the check only applies to a model that says which parts stand on the ground.
+    "everything is held up by something" is a claim about a physical assembly,
+    and plenty of models are not one - a mechanism, an exploded layout, a pair of
+    blocks in a test fixture. a project that flags `grounded` has told fcad it is
+    modelling a stack; one that leaves it to the auto-ground default has not, and
+    is left alone. returns (instance,)."""
+    model = model or Model(project, values)
+    if not any(getattr(s, "grounded", False) for s in model.specs):
+        return []
+    bad = []
+    for name, spec, s in model.structural:
+        if getattr(spec, "grounded", False):
+            continue
+        blank = model.blank(spec, s.Placement)
+        if any(blank.BoundBox.intersect(e.BoundBox)
+               and blank.common(e).Volume > tol
+               for _, _, e in model.embedded):
+            continue                      # fastened, so gravity is not the story
+        moved = s.copy()
+        moved.Placement = App.Placement(s.Placement.Base + V(0, 0, -drop),
+                                        s.Placement.Rotation)
+        if model.hit(moved, skip=name)[1] <= tol:
+            bad.append(name)
+    return bad
+
+
+def find_undrilled(project, values, model=None):
+    """parts declaring `holes` that are not bored in the solid.
+
+    `holes` is what fcad dimensions on the drawing and draws on the sketch;
+    cutting them is the project's job in `from_spec`. that split is easy to
+    half-implement, and the result is a part carrying its drainage on paper and
+    none in the wood -- which no other check can see, because a solid with one
+    fewer hole is a perfectly good solid.
+
+    a hole's centre lies in the part's own XY plane at mid-thickness, so testing
+    whether that point is still inside the solid answers it exactly. returns
+    (part, n_undrilled, n_declared)."""
+    model = model or Model(project, values)
+    seen, bad = set(), []
+    for _, spec, solid in model.structural + model.embedded:
+        holes = getattr(spec, "holes", ()) or ()
+        if spec.name in seen or not holes:
+            continue
+        seen.add(spec.name)
+        # the solid is placed; test in its own frame instead.
+        base = project.from_spec(spec)
+        missing = sum(1 for cx, cy, _ in holes
+                      if base.isInside(App.Vector(cx, cy, 0.0), HOLE_TOL, True))
+        if missing:
+            bad.append((spec.name, missing, len(holes)))
+    return bad
+
+
+def find_sketch_drift(project, values, budget=SKETCH_DRIFT, model=None):
+    """parts whose defining sketch is a poor description of the part.
+
+    the sketch is what lands in `dist/sketches` and on the drawing, so a part
+    built as a blank minus joinery on other planes -- a groove down one face, a
+    housing across another, a lap taking half the thickness -- is documented by
+    an outline it does not match. drilled features are expected to be missing
+    and are small; structural ones are not. advisory, not a failure: what counts
+    as "the defining outline" is the project's call. returns (part, fraction)."""
+    model = model or Model(project, values)
+    seen, out = set(), []
+    for _, spec, solid in model.structural:
+        if spec.name in seen or project.profile(spec) is None:
+            continue
+        seen.add(spec.name)
+        blank = model.blank(spec, solid.Placement)
+        if blank.Volume <= 0:
+            continue
+        frac = (blank.Volume - solid.Volume) / blank.Volume
+        if frac > budget:
+            out.append((spec.name, frac))
+    return out
 
 
 def find_unconstrained(path):
@@ -192,6 +446,11 @@ def write_cutlist(project, specs, path):
     for prof, plan in out:
         for line in cutlist.summary(prof, plan):
             print(line)
+    # per-profile lines answer "how do I cut the 2x6"; nobody's shopping list is
+    # one profile, so say what the whole model costs to buy.
+    prices = {prof: cutlist.prices_for(project.stock, prof) for prof, _ in out}
+    for line in cutlist.totals(dict(out), prices):
+        print(line)
 
 
 def build_jointed_doc(project, values, data, parts_dir, path):

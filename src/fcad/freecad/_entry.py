@@ -70,7 +70,8 @@ def _route(cmd):
     else:
         from fcad.freecad import dispatch
         from fcad.loader import load_project
-        if cmd not in dispatch.TARGETS and cmd not in ("check", "precommit"):
+        if cmd not in dispatch.TARGETS and cmd not in ("check", "precommit",
+                                                       "optimize"):
             sys.stderr.write("fcad: unknown command %r\n" % cmd)
             raise SystemExit(2)
         project = load_project()
@@ -78,6 +79,8 @@ def _route(cmd):
             dispatch.check(project)
         elif cmd == "precommit":
             dispatch.precommit(project)
+        elif cmd == "optimize":
+            dispatch.optimize(project)
         else:
             dispatch.run(project, cmd)
 

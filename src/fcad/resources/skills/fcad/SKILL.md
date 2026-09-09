@@ -55,6 +55,7 @@ else is optional refinement:
 | `MATERIAL` / `MATERIALS` | project-wide fem material default / named registry |
 | `STOCK` | buyable stock lengths per bom profile (below) |
 | `FROM_SPEC` / `PROFILE` | realize a spec that is not an `fcad.Part` |
+| `CONSTRAINTS` | predicates saying when the model still means what it says |
 | `NAME`, `SCHEMA`, `ENUM_CHOICES` | override the inferred name/varset/dropdowns |
 
 each is read as the UPPER_CASE constant or the lowercase `Project` kwarg name,
@@ -118,8 +119,10 @@ run from the project directory and none of it needs overriding.
 
 ```
 fcad build [TARGET ...]   no target = all; one freecadcmd pass per token
-fcad check                interference + constrained components + constrained sketches
+fcad check                the nine assertions below
 fcad precommit            build all, then check
+fcad test [PATH ...]      run tests/test_*.py, judged by their verdict file
+fcad optimize P [P ...]   sweep parameters for a cheaper cut list
 fcad view [parts]         gui; --part NAME for one part
 fcad render|animate [T]   offscreen png / mp4+gif from a built stl
 fcad fem [T]              headless gmsh + CalculiX; --modal / --modes K
@@ -148,10 +151,38 @@ cutlist`. multiple tokens union. stage-bound tokens keep their meaning:
 `sketches` is parts-only, `bom` and `cutlist` are assembly-only (only the
 assembly knows how many of a part there are).
 
-**what `check` asserts** (R3.1) - all three must hold before a commit:
-1. no structural solids interpenetrate (`embeds` parts excluded)
-2. every assembly component is grounded or jointed
-3. every defining sketch is fully constrained
+**what `check` asserts** (R3.1) - all of these must hold before a commit:
+1. every predicate in `CONSTRAINTS` holds
+2. no structural solids interpenetrate (`embeds` parts excluded)
+3. every `embeds` part is seated: it displaces nothing, and something holds it
+4. every part is grounded, fastened, or resting on another
+5. no part cuts away more material than anything fills
+6. every hole a part declares is actually bored in it
+7. every part is one connected solid
+8. every assembly component is grounded or jointed
+9. every defining sketch is fully constrained
+
+(1) is the project's own statement of when the model still means what it says,
+and is checked first because a model that has stopped meaning it makes the rest
+moot.
+
+**(3) to (7) look for the absence of geometry, which (2) is structurally unable
+to see.** a fastener that fits no hole, a part with nothing under it, a cut
+larger than the joint it relieves, a hole dimensioned on the drawing and never
+made, a part severed by its own joinery: every one of those renders correctly,
+exports correctly, and passes an interference test. that is the whole reason
+they exist, and they were each written after a real model shipped the failure.
+
+notes on the ones with judgement in them:
+- (3) reports `interferes` (exact) apart from `unseated` (a nudge test, so a
+  heuristic). `embeds` means "this sinks into something", not "stop looking".
+- (4) only applies to a model that flags `grounded` somewhere - "held up by
+  something" is a claim about a physical stack, and plenty of models are not
+  one. a part with an `embeds` part through it counts as fastened.
+- (5) budgets the void as a fraction of the part's own blank, because real
+  clearances scale with the part and a mistake does not.
+- `check` also *notes* (without failing) a part that loses more than 5% of its
+  defining outline to joinery: its sketch is documenting stock, not the part.
 
 ## what lands in dist/
 
@@ -236,6 +267,63 @@ undo at the cost of that guarantee.
 
 needs `gmsh` and `ccx` on PATH.
 
+## CONSTRAINTS, and finding a cheaper size
+
+a parametric model has sizes at which it silently stops being the thing it
+describes: a depth clamped against the stack beneath it, a count collapsing to
+zero. `CONSTRAINTS` is how a project says so - a list of
+`(values, computed) -> bool | str` predicates, where returning a string names
+what went wrong and is what a person reads.
+
+```python
+CONSTRAINTS = [
+    lambda p, d: (d["soil_depth"] >= p["soil_depth"]
+                  or "the bed clamps to %.0f mm" % d["soil_depth"]),
+]
+```
+
+`check` asserts them. `fcad optimize` **refuses any candidate that breaks one**,
+which is the only thing that makes a sweep safe:
+
+```
+fcad optimize outer_len outer_wid --span 60 --step 10 --objective boards
+```
+
+it varies the named numeric params over a grid, packs the real bom for each
+through the cut list solver, and ranks them. without constraints it will find
+the corner where the model degrades and report it as a saving, because from the
+outside there genuinely are fewer boards - a real sweep once "saved" three
+boards by quietly shrinking a planter's bed by 50 mm. a project that declares
+none is warned, loudly, in the output.
+
+ranking follows `--objective`, and the choice matters more here than in the cut
+list: on a real model the fewest-boards answer bought 3.6 m *more* timber than a
+plan with one board extra. purchased length is the default for that reason.
+
+## testing a project
+
+`fcad test` runs `tests/test_*.py` under freecadcmd and judges each by the
+verdict it writes, not by its exit status - freecadcmd exits 0 on an uncaught
+exception and discards buffered stdout when it does not, so a test trusted on
+either channel reports a crash as a pass. `fcad.testing` supplies the other half:
+
+```python
+from fcad import testing
+
+def main():
+    c = testing.Checks()
+    mod = testing.load(testing.find())        # a .fcad is not importable
+    parts = testing.specs(mod)
+    c("the deck bears on the sills",
+      testing.near(testing.extent(mod, parts["deck_board"]).ZMin, top))
+    return c.report()                         # writes $RESULT_FILE
+
+testing.main(main, __file__)
+```
+
+plus `solids`, `blanks`, `extent`, `overlap`, `near` - the vocabulary every
+project's tests turned out to need.
+
 ## STOCK and the cut list
 
 `fcad build cutlist` packs each bom profile's pieces into buyable stock lengths
@@ -244,6 +332,14 @@ and writes `dist/<name>-cutlist.csv` plus a summary line per profile.
 ```python
 FT = 304.8
 STOCK = {"2x6": [8*FT, 10*FT, 12*FT, 16*FT], "2x4": [8*FT, 10*FT, 12*FT]}
+```
+
+an entry may carry a price as `(length, price)`, which adds a cost to the
+totals line. the summary ends with one, because per-profile lines answer "how do
+I cut the 2x6" and nobody's shopping list is one profile:
+
+```
+  total: 16 board(s), 55474 mm purchased, 2386 mm waste (4.3%)
 ```
 
 keys are the same `profile` label the bom uses; a bare list applies to every

@@ -70,17 +70,58 @@ never regress on them.
   exact where the search is small enough to prove and first-fit-decreasing above
   that, and says which it was; a piece longer than every stock length is reported,
   never silently dropped.
+- R2.5.1 the cut list summary ends with a total across every profile: boards,
+  purchased length, waste, and a price where `STOCK` carries one (an entry may
+  be `(length, price)`). per-profile lines answer how to cut one profile; nobody's
+  shopping list is one profile. purchased length leads because board count is
+  only a proxy for cost - a 16 ft board is not one 8 ft board - and waste
+  *percentage* is worse than either, since a model can buy less total timber at
+  a higher percentage.
 
 ## R3 - validate (headless)
 
 - R3.1 `check` fails (non-zero exit) if any structural solids interpenetrate
-  (parts flagged `embeds`, e.g. screws, are excluded), if any assembly component
-  is neither grounded nor jointed, or if any defining sketch is not fully
-  constrained. a failure states its reason - the overlapping pairs and their
-  volumes, the unconstrained components, the loose sketches - and that report
-  reaches stdout whether it is a terminal, a pipe, a file or CI. an exit status
-  with no reason is a failure of this requirement.
+  (parts flagged `embeds`, e.g. screws, are excluded), if any `embeds` part is
+  not seated in a cavity cut for it, if any assembly component is neither
+  grounded nor jointed, or if any defining sketch is not fully constrained. a
+  failure states its reason - the overlapping pairs and their volumes, the
+  unseated parts and what they run into, the unconstrained components, the loose
+  sketches - and that report reaches stdout whether it is a terminal, a pipe, a
+  file or CI. an exit status with no reason is a failure of this requirement.
+- R3.1.1 the `embeds` exclusion in R3.1 owes the model a compensating check. a
+  part dropped from the interference test must still not interpenetrate a
+  structural solid, and must be held by one: the flag says "this sinks into
+  something", not "stop looking at this". without it a fastener turned across
+  its own bore, or driven into a slot that was never cut, passes every other
+  assertion and renders perfectly.
+- R3.1.2 `check` must also assert the things an interference test is
+  structurally unable to see, because they are *absences*: a part with nothing
+  holding it up, a cut larger than the joint it relieves, a hole a part
+  dimensions but never bores, a part severed by its own joinery. each renders
+  and exports exactly like a correct one. a check that only looks for overlap
+  cannot see a joint that is wrong in the other direction.
+- R3.1.3 a project may declare `CONSTRAINTS`: predicates over its own computed
+  values saying when the model still means what it says. `check` asserts them
+  and reports the ones that broke, by whatever name the predicate gives itself.
 - R3.2 `precommit` builds everything, then runs `check`.
+- R3.3 `test` runs a project's `tests/test_*.py` and judges each by the verdict
+  it wrote, never by its exit status or its stdout: `freecadcmd` exits 0 on an
+  uncaught exception and discards buffered stdout when it does not, so a runner
+  trusting either reports a crash as a pass. a test that writes no verdict at
+  all has failed, and is reported as such rather than skipped.
+
+## R3b - search
+
+- R3b.1 `optimize` sweeps named numeric parameters over a grid, packs the real
+  bom for each candidate through the cut list solver, and ranks them by
+  purchased length or board count. it never touches the kernel beyond loading
+  the project.
+- R3b.2 `optimize` must refuse any candidate that violates `CONSTRAINTS`, and
+  must warn when a project declares none. an optimiser over a parametric model
+  will otherwise find the corner where the model degrades and report it as a
+  saving - fewer boards, because there genuinely are fewer - with nothing said
+  about what it spent to get them. this is not a refinement of R3b.1; it is what
+  makes R3b.1 safe to act on.
 
 ## R4 - inspect
 
@@ -225,6 +266,16 @@ never regress on them.
   self-weight, a steel card) so any project yields a result. a target whose mesh
   cannot be solved fails with a clear, non-zero error rather than a partial
   artifact.
+- R6.2.1 a case's `gravity` is read in the part's own stock frame, so fcad warns
+  when the declared vector does not point down once the assembly places that
+  part. a frame gets rotated for reasons unrelated to the load case, and the
+  solve does not fail when it happens - it loads the member along the wrong axis
+  and returns a plausible number. a wrong answer that looks like an answer is
+  worse than a crash. a warning, not an error: a case may model something other
+  than gravity, and a part used at several placements cannot satisfy all of them.
+- R6.2.2 a result bundle records a hash of the project source that produced it.
+  a solve takes minutes, so results outlive the geometry that made them, and a
+  stale von Mises number reads exactly like a fresh one.
 - R6.3 `fem --modal`/`--modes K` additionally computes K eigenmodes (frequencies +
   mode shapes) into the same npz.
 - R6.4 `fem-render [TARGET]` writes an offscreen PNG of the deformed surface colored

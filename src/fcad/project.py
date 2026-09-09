@@ -109,7 +109,8 @@ class Project:
 
     def __init__(self, name, root=None, params=None, schema=None, compute=None,
                  from_spec=None, profile=None, enum_choices=None, fem=None,
-                 param_meta=None, material=None, materials=None, stock=None):
+                 param_meta=None, material=None, materials=None, stock=None,
+                 constraints=None):
         self.name = name              # output stem: <name>.FCStd, <name>-bom.csv
         self.root = root or os.getcwd()   # project root; dist/ is created under it
         self.params = dict(params or {})  # default parameter values
@@ -127,6 +128,35 @@ class Project:
         # purchasable stock lengths per bom profile (or one list for all). which
         # profiles appear here decides which parts the cut list plans at all.
         self.stock = stock
+        # predicates `(values, computed) -> bool | str` that say when the model
+        # still means what it says. fcad never learns what they mean; it only
+        # asks. a parametric model has sizes at which it silently stops being
+        # the thing it describes -- a dimension clamped, a member vanished --
+        # and both `check` and `optimize` need to be able to tell.
+        self.constraints = list(constraints or ())
+
+    def violations(self, values, computed=None):
+        """which constraints this parameter set breaks, as printable strings.
+
+        a predicate may return False, or a string naming what went wrong; the
+        string is what a person reads, so it is worth writing."""
+        if not self.constraints:
+            return []
+        data = self.compute(values) if computed is None else computed
+        out = []
+        for i, rule in enumerate(self.constraints):
+            try:
+                verdict = rule(values, data)
+            except Exception as exc:               # a broken rule is a failure
+                out.append("constraint %d raised %s" % (i, exc))
+                continue
+            if verdict is False or verdict is None:
+                name = getattr(rule, "__doc__", None) or getattr(
+                    rule, "__name__", "constraint %d" % i)
+                out.append(str(name).strip().splitlines()[0])
+            elif isinstance(verdict, str):
+                out.append(verdict)
+        return out
 
     @property
     def dist(self):

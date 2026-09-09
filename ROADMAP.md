@@ -20,6 +20,113 @@
 
 ## done
 
+- **the checks that look for what is *not* there.** everything `check` asserted
+  before this was positive space - solids that overlap, components that float,
+  sketches that are loose. an assembly fails the other way round just as easily,
+  and those failures are invisible to an overlap test by construction. `check`
+  now also asserts: every `embeds` part is seated (R3.1.1); every part is
+  grounded, fastened or resting on another; no part cuts away more than anything
+  fills; every declared hole is actually bored; every part is one connected
+  solid (R3.1.2). it *notes*, without failing, a part that loses more than 5% of
+  its defining outline to joinery - what counts as the defining outline is the
+  project's call.
+
+  each was written from a real failure, and each of those rendered correctly,
+  exported correctly and passed every assertion fcad had. the seating check
+  found two on the day it was written, and then found a third in the *older*
+  planter, which it was not designed for: 51 of that model's 180 screws are
+  driven through undrilled post material, 465 mm^3 each, never into
+  `corner_post_001`. that is its own backlog note - "per-corner mirror-image
+  hole patterns blocked reusable part files" - turned from a sentence into a
+  number and a list of instances. **that project's `check` now fails until it is
+  fixed, which is the correct outcome and worth knowing before upgrading.**
+
+  the judgement calls are deliberate and documented where they live: the
+  support check only applies to a model that flags `grounded` somewhere, because
+  "held up by something" is a claim about a physical stack and plenty of models
+  are not one; a void is budgeted as a fraction of the part's own blank, because
+  real clearances scale with the part and a mistake does not; the seating nudge
+  is 1.5 mm, larger than a typical pilot clearance, or a correctly seated
+  fastener reads as loose. `tests/test_checks.py` pins all four against fixtures
+  rigged to fail and rigged to pass.
+
+- **`CONSTRAINTS` and `fcad optimize`.** a project declares predicates over its
+  own computed values saying when the model still means what it says; `check`
+  asserts them (R3.1.3) and `optimize` refuses any candidate that breaks one
+  (R3b). the two shipped together because the second is unsafe without the
+  first: a sweep left to itself finds the corner where the model degrades and
+  reports it as a saving, since from the outside there genuinely are fewer
+  boards. the hand-rolled version that motivated this "saved" three boards by
+  quietly clamping a planter's soil bed from 400 mm to 350, and said nothing.
+  a project declaring no constraints is warned, loudly, in the output.
+
+  on the planter it found an envelope 10 mm longer and 50 mm wider taking 16
+  boards instead of 18 while carrying 6% more bed. it also made the objective
+  choice concrete: ranked by boards it finds 15-board plans, ranked by purchased
+  length it prefers a 17-board plan that buys 3.6 m less timber. board count is
+  a proxy for cost and not a good one, so length is the default.
+
+  it runs on the headless path despite touching nothing in the kernel, because
+  loading a project means importing its module and a project module imports
+  `Part`. `fcad.optimize` itself is pure stdlib and tested as such.
+
+- **`fcad test` and `fcad.testing`.** `freecadcmd` exits 0 on an uncaught
+  exception and discards buffered stdout when it exits non-zero, so a test
+  judged on either channel reports a crash as a pass. *both* projects using fcad
+  had independently invented the same workaround - write a verdict to
+  `$RESULT_FILE`, grep it - and then hand-written the same `load` / `solids` /
+  `blanks` / `extent` / `overlap` / `near` helpers on top. when two projects
+  converge on the same hack it belongs in the tool (R3.3). a test that writes no
+  verdict at all is a failure and says so, rather than passing quietly.
+
+- **fem results say what made them, and warn when they are aimed wrong.** a case's
+  `gravity` is read in the part's own stock frame, so fcad now checks it against
+  the part's real placement and complains when it no longer points down
+  (R6.2.1): a bearer whose frame had been rotated for an unrelated reason solved
+  happily at 13.8 MPa against a true 3.3, loaded across its weak axis with its
+  own weight pulling sideways. and every result bundle records a hash of the
+  project source (R6.2.2), because a solve takes minutes, results outlive the
+  geometry that made them, and a stale von Mises number reads exactly like a
+  fresh one - which both projects had hand-rolled the same makefile target to
+  guard against.
+
+- **the cut list totals, and can be priced.** the summary ends with boards,
+  purchased length, waste and optionally money across every profile (R2.5.1); a
+  `STOCK` entry may be `(length, price)`. per-profile lines answer how to cut one
+  profile, and nobody's shopping list is one profile. purchased length leads
+  because waste percentage is actively misleading as a headline: the planter's
+  chosen envelope buys *less* total timber at a *higher* waste percentage.
+
+
+- **`embeds` seating check.** `find_overlaps` skips `embeds` parts *by design* -
+  the right call, and a hole: the parts fcad stops checking are exactly the ones
+  whose whole job is to sit inside a hole in something else. `find_unseated`
+  closes it, and `check` now asserts it (R3.1, R3.1.1). two findings, reported
+  apart because one is exact and one is a heuristic: **`interferes`**, a part
+  ploughing through a structural solid, which is the failure worth having the
+  check for; and **`unseated`**, a part nudged 1.5 mm along each axis that meets
+  material from fewer than three of six directions - a through bore captures
+  four, a blind hole five, a part lying on a face one, mid-air none.
+
+  it earned its place twice over on the day it was written. it reproduces both
+  planter-nihon bugs that motivated it (pegs turned 90 degrees to their own
+  bores; a wedge mortise closed on four sides, leaving solid tenon above and
+  below it so no wedge could ever be inserted - both of which rendered and
+  exported perfectly and passed every other assertion). and run against the
+  *older* planter, which it was not designed for, it immediately found a real
+  defect that project had recorded qualitatively and never measured: 51 of its
+  180 screws are driven through undrilled post material, 465 mm^3 each, and
+  never into `corner_post_001`. that is its backlog item "per-corner mirror-image
+  hole patterns blocked reusable part files" - the parts are drilled from
+  `placements[0]` only, so the three mirrored corners get the first corner's
+  holes. a qualitative note became a number and a list of instances.
+
+  the nudge is deliberately larger than a typical pilot clearance (1.5 mm
+  against the ~0.5 mm radial gap a 1 mm-oversize clearance hole leaves) or a
+  correctly seated fastener reads as loose. `tests/test_seating.py` pins all
+  three states - seated, crossways, floating - plus silence on a model with no
+  embedded parts at all.
+
 - **the assembly animation climbs instead of ringing outward.** the walk was
   breadth-first, which guarantees a part arrives attached to something already
   placed but says nothing about *which* attached part comes next - so it arrived

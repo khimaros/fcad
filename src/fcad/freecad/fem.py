@@ -42,6 +42,10 @@ MATERIALS = {"steel": "CalculiX-Steel", "aluminum": "Aluminum-6061-T6",
              "hardwood": {"E": 13000.0, "nu": 0.40, "rho": 700.0}}
 DEFAULT_MODES = 6          # modal count when --modal is given without a number
 GRAVITY = "9.81 m/s^2"
+# how far a case's declared gravity may lean off world -Z, once the part is
+# placed, before it is worth saying so. generous: the point is to catch a vector
+# aimed along the wrong axis entirely, not to police a deliberate slope.
+GRAVITY_TOL = 0.7
 # 2nd-order (10-node) tets. FreeCAD defaults its gmsh mesher to 1st order, and
 # 4-node tets are badly over-stiff in bending: a cantilever reads ~21% under its
 # closed form at the mesh sizes fcad picks, converging from below only as the mesh
@@ -520,12 +524,89 @@ def solve(project, values, target, dist):
         return _solve(project, values, target, dist, work)
 
 
+def source_stamp(project):
+    """a hash of the project's source, for stamping into a result bundle.
+
+    a solve takes minutes, so results outlive the geometry that made them, and a
+    stale von Mises number reads exactly like a fresh one. every project so far
+    has hand-rolled the same makefile target to refuse them; this is the fact
+    that makes it fcad's job instead."""
+    import hashlib
+    h = hashlib.sha256()
+    for path in sorted(_source_files(project)):
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            continue
+    return h.hexdigest()
+
+
+def _source_files(project):
+    """the project's own python: a single `.fcad`, or a directory's modules."""
+    root = getattr(project, "root", None) or os.getcwd()
+    out = []
+    for entry in sorted(os.listdir(root)):
+        if entry.endswith(".fcad") or entry.endswith(".py"):
+            out.append(os.path.join(root, entry))
+    return out
+
+
+def stale_reason(project, data):
+    """why a loaded result bundle no longer matches the project, or None.
+
+    a bundle from before stamping has no `source` at all, which is worth saying
+    once rather than treating as either fresh or stale."""
+    stored = data.get("source") if hasattr(data, "get") else None
+    if stored is None or (hasattr(stored, "size") and stored.size == 0):
+        return "it predates source stamping, so it cannot be checked"
+    if str(stored) != source_stamp(project):
+        return "the project has changed since it was solved"
+    return None
+
+
+def check_gravity(project, values, target, case):
+    """the complaint when a case's `gravity` does not point down once placed.
+
+    fem solves in the part's own stock frame, so `gravity=(0,0,-1)` means
+    whatever that frame currently means -- and a frame gets rotated for reasons
+    that have nothing to do with the load case (to bring an end shoulder into
+    the defining sketch, say). fcad owns both the case format and the
+    placements, so it can hold them against each other without knowing anything
+    about the model: rotate the declared vector by the part's own placement and
+    it has to come out pointing at the floor.
+
+    a warning rather than a failure. a case may legitimately model something
+    other than gravity, and a part used at several placements cannot satisfy all
+    of them at once -- but the default is silence, so a model that has never
+    thought about this hears nothing from it until it is wrong. returns the
+    message, or None."""
+    gravity = _get(case, "gravity", None)
+    if gravity is None or not _get(case, "self_weight", True):
+        return None
+    spec = next((s for s in project.compute(values)["specs"]
+                 if s.name == target), None)
+    if spec is None or not getattr(spec, "placements", None):
+        return None
+    world = spec.placements[0].Rotation.multVec(App.Vector(*gravity))
+    if world.z < -GRAVITY_TOL:
+        return None
+    return ("fcad fem: %s declares gravity %s, which points (%.2f, %.2f, %.2f) "
+            "once the assembly places the part -- not down. fem solves in the "
+            "part's own frame, so this loads it along the wrong axis and still "
+            "returns a number."
+            % (target, tuple(gravity), world.x, world.y, world.z))
+
+
 def _solve(project, values, target, dist, work):
     shape = build_assembly.target_shape(project, values, target,
                                         undrilled=_undrilled(project, target))
     if shape is None:
         raise SystemExit("fcad fem: no such target %r" % target)
     case = _resolve_case(project, target, shape, values)
+    complaint = check_gravity(project, values, target, case)
+    if complaint:
+        print(complaint)
     infos = _face_infos(shape)
     modes = _modes(case)
 
@@ -598,8 +679,14 @@ def main(target="assembly"):
     values = project.defaults()
     dist = project.dist
     dispatch.dirs(project)            # ensure dist/ exists
+    stamp = source_stamp(project)
     for name in _targets(project, target):
         out = solve(project, values, name, dist)
+        # stamp what produced it: stale results still look authoritative long
+        # after the geometry that made them has changed, and every reader of
+        # this bundle (render, animate, a person quoting a number) has no other
+        # way to tell. see `stale_reason`.
+        out["source"] = stamp
         path = os.path.join(dist, name + ".fem.npz")
         np.savez_compressed(path, **out)
         print("fem ok: target=%s nodes=%d modes=%d vm_p95=%.2f MPa "

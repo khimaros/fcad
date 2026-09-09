@@ -26,7 +26,7 @@ _GLOBALS = {
     "PARAMS": "params", "SCHEMA": "schema", "COMPUTE": "compute",
     "FROM_SPEC": "from_spec", "PROFILE": "profile", "ENUM_CHOICES": "enum_choices",
     "FEM": "fem", "PARAM_META": "param_meta", "MATERIAL": "material",
-    "MATERIALS": "materials", "STOCK": "stock",
+    "MATERIALS": "materials", "STOCK": "stock", "CONSTRAINTS": "constraints",
 }
 
 
