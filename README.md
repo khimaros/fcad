@@ -320,10 +320,12 @@ plus the placements a build records, not the assembly STL -- that one is a singl
 welded lump with no part boundaries left in it.
 
 the arrival order matters more than it sounds, and fcad reads it off flags your
-project already declares. `--order grounded` (the default) walks outward from the
-part flagged `grounded` over what actually touches what, so nothing ever arrives
-floating, and holds parts flagged `embeds` to the end -- a screw should not be
-driven before the board it holds. both flags are the ones you already write:
+project already declares. `--order grounded` (the default) lands the parts
+flagged `grounded` first and then takes, over and over, the lowest part that
+touches what is already there -- so nothing ever arrives floating, and the model
+goes up a course at a time rather than a ring at a time. parts flagged `embeds`
+are held to the end: a screw should not be driven before the board it holds. both
+flags are the ones you already write:
 `grounded` is what anchors the assembly, and `embeds` is what excludes fasteners
 from `check`'s interference test, so a project that already models its screws
 needs no extra annotation. on the fastenplates example a plain z-sort drives the

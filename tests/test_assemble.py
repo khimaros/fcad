@@ -4,9 +4,11 @@ R4.3. `fcad animate --subject assemble` flies the parts in one at a time, and th
 only interesting question is what "one at a time" means. a z-sort looks right on
 a stack and is wrong the moment a model has fasteners in it: on the shipped
 fastenplates example it drives the screw home between the two plates it holds.
-so the order is a breadth-first walk of the contact graph outward from the
-`grounded` part, with `embeds` parts held to the end - three things fcad already
-knows, none of which needed a new affordance invented for them.
+so the order starts at the `grounded` parts, then repeatedly takes the lowest
+part touching what is already placed, with `embeds` parts held to the end - three
+things fcad already knows, none of which needed a new affordance invented for
+them. contact is what keeps a part from arriving floating; height is what makes
+the result a course at a time rather than a ring at a time.
 
 the joint graph is deliberately not the source: `build_jointed_doc` fixes every
 non-grounded part to one datum, so it is a star and every part is one hop from
@@ -64,9 +66,68 @@ FASTENED = [("plate.0", ((0, 0, 0), (40, 40, 5))),
 FASTENED_MARKS = {"plate": {"grounded": True, "embeds": False},
                   "screw": {"grounded": False, "embeds": True}}
 
+# the shape of the planter, small enough to read: two anchoring posts, a course
+# of rails at the bottom and another at the top, and a deck bearing on the
+# bottom course. each rail reaches only its own post, so a walk that takes the
+# oldest queued part next empties one post's ring before starting the other's -
+# it climbs to the top twice, and the deck, two hops out, lands after the top
+# course it should precede by the whole height of the model.
+TOWER = [("post.0", ((0, 0, 0), (10, 10, 100))),
+         ("post.1", ((90, 0, 0), (100, 10, 100))),
+         ("lrail.0", ((0, 0, 0), (40, 10, 10))),
+         ("lrail.1", ((0, 0, 90), (40, 10, 100))),
+         ("rrail.0", ((60, 0, 0), (100, 10, 10))),
+         ("rrail.1", ((60, 0, 90), (100, 10, 100))),
+         ("deck.0", ((15, 0, 10), (40, 10, 20)))]
+TOWER_MARKS = dict({"post": {"grounded": True, "embeds": False}},
+                   **{p: {"grounded": False, "embeds": False}
+                      for p in ("lrail", "rrail", "deck")})
+
 
 def _labels(parts, how, marks):
     return [label for label, _ in assemble.order(parts, how, marks, tol=1.0)]
+
+
+def _bottoms(parts, how, marks):
+    return [float(tris[:, :, 2].min())
+            for _, tris in assemble.order(parts, how, marks, tol=1.0)]
+
+
+def _all_supported(parts, how, marks):
+    """every part after the anchors touches one already placed."""
+    seq = assemble.order(parts, how, marks, tol=1.0)
+    near = assemble.touching(seq, 1.0)
+    anchored = {i for i, (label, _) in enumerate(seq)
+                if marks.get(label.rsplit(".", 1)[0], {}).get("grounded")}
+    return all(i in anchored or bool(near[i] & set(range(i)))
+               for i in range(len(seq)))
+
+
+def _course_checks():
+    """R4.3: and it climbs, so the sequence reads as construction.
+
+    walking the contact graph is what keeps every part attached to something
+    already there; taking the *lowest* reachable part next is what makes the
+    result followable. breadth-first satisfies the first and not the second: it
+    arrives in rings around the anchor, so a model with several anchors climbs
+    once per ring and anything more than one hop out - a deck on its bearers -
+    lands after the top course, whatever height it sits at."""
+    tower = _parts(TOWER)
+    seq = _labels(tower, "grounded", TOWER_MARKS)
+    bottoms = _bottoms(tower, "grounded", TOWER_MARKS)
+    at = {label: i for i, label in enumerate(seq)}
+    return [
+        ("the anchors arrive first, before anything they carry",
+         seq[:2] == ["post.0", "post.1"]),
+        ("then the walk climbs, never dropping back to a lower part %s"
+         % bottoms, all(a <= b for a, b in zip(bottoms, bottoms[1:]))),
+        ("so a course lands together rather than one anchor's ring at a time",
+         at["rrail.0"] < at["lrail.1"]),
+        ("and a low part two hops out precedes the top course, not follows it",
+         at["deck.0"] < at["lrail.1"]),
+        ("while every part still arrives attached to something already placed",
+         _all_supported(tower, "grounded", TOWER_MARKS)),
+    ]
 
 
 def _order_checks():
@@ -263,7 +324,8 @@ def _render_checks(root):
 def main():
     root = tempfile.mkdtemp()
     try:
-        checks = (_order_checks() + _robustness_checks() + _timing_checks()
+        checks = (_order_checks() + _course_checks()
+                  + _robustness_checks() + _timing_checks()
                   + _concurrency_checks() + _length_checks()
                   + _render_checks(root))
     finally:

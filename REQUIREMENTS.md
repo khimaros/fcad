@@ -113,9 +113,11 @@ never regress on them.
   `assemble` is driven by the part STLs plus `<name>-placements.json` and
   `<name>-parts.json`, never the assembly STL, which is one welded lump with no
   part boundaries left in it. the arrival order (`--order`) defaults to
-  `grounded`: a breadth-first walk of the contact graph outward from the part
-  flagged `grounded`, with `embeds` parts held to the end, because a fastener
-  must not arrive before the structure it fastens. a model with no such flags
+  `grounded`: the parts flagged `grounded` first, then repeatedly the lowest part
+  that touches what is already placed, with `embeds` parts held to the end. no
+  part may arrive floating, a fastener must not arrive before the structure it
+  fastens, and the sequence must climb rather than ring outward from the anchor,
+  so a model is watched being built a course at a time. a model with no such flags
   recorded, or none to assemble, falls back or fails loudly rather than animating
   something misleading.
 - R4.4 the 3d geometry diff of the working tree vs git HEAD (green added / red

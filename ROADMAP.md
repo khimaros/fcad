@@ -20,6 +20,19 @@
 
 ## done
 
+- **the assembly animation climbs instead of ringing outward.** the walk was
+  breadth-first, which guarantees a part arrives attached to something already
+  placed but says nothing about *which* attached part comes next - so it arrived
+  in rings around the anchor. on the planter that read as three separate climbs
+  from ground to cap (one per corner post's ring, the posts sharing few
+  neighbours) with the floor deck landing *after* the cap, since the deck is
+  three hops out over ledger and runner while the top course is one hop off a
+  post. the frontier is a heap on height now rather than a fifo: anchors first,
+  then repeatedly the lowest part touching what is placed. same graph, same
+  guarantee, and the planter now goes posts, first course, ledgers, second
+  course, runners, deck, remaining courses, cap, screws - which is the order you
+  would build it in. `tests/test_assemble.py` pins it on a two-post tower whose
+  rails reach only their own post, the small version of exactly that failure.
 - **the animation stopped eating the machine.** three compounding faults, found
   when `FCAD_AT_ONCE=1 fcad animate --speed 0.7` on the planter took the box out.
   (1) **the gif writer buffered every frame.** matplotlib's `PillowWriter` holds

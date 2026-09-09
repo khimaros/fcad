@@ -85,8 +85,9 @@ fcad.Part(name, placements, solid=None, profile2d=None, profile="",
   intentionally sinks into other solids (screws) needs this or `check` fails.
 
 `grounded` and `embeds` do double duty: they also order the assembly animation,
-which walks outward from the grounded part over what touches what and holds the
-`embeds` parts to the end. so flagging them correctly is what makes
+which lands the grounded parts first and then takes, repeatedly, the lowest part
+touching what is already placed, holding the `embeds` parts to the end - so the
+model goes up a course at a time. flagging them correctly is what makes
 `fcad animate` read as construction - unflagged, it falls back to a z-sort and
 drives screws home midway up the stack. no separate annotation exists or is
 needed for this.

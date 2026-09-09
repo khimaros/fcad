@@ -16,9 +16,17 @@ the order is the part worth getting right, and it comes from three things fcad
 already knows. `grounded` says which part anchors the model. the contact graph -
 which instances touch - is arithmetic over geometry the renderer already holds.
 and `embeds` already marks the fasteners, because it is the flag that excludes
-screws from the interference check. so the sequence is a breadth-first walk
-outward from the anchor with the fasteners held to the end, which is the order
-someone would actually build the thing in.
+screws from the interference check. so the sequence starts at the anchors, then
+takes the lowest part reachable over contact from what is already placed, and
+holds the fasteners to the end - which is the order someone would actually build
+the thing in.
+
+reachability is what keeps a part from arriving floating; *lowest* is what makes
+the result followable. taking the oldest reachable part instead (a breadth-first
+walk) satisfies the first and not the second: it arrives in rings around the
+anchor, so a model with four grounded posts climbs post-to-cap once per post, and
+a floor deck three hops out lands after the cap it should precede by the whole
+height of the model.
 
 note the joint graph is *not* the source: `build_jointed_doc` fixes every
 non-grounded part to a single datum, so it is a star with everything one hop from
@@ -26,6 +34,7 @@ the anchor. it exists to make the assembly fully constrained, not to describe
 what touches what.
 """
 
+import heapq
 import json
 import math
 import os
@@ -128,20 +137,21 @@ def touching(parts, tol):
     return near
 
 
-def _lowest(parts, among):
-    return min(among, key=lambda i: (float(parts[i][1][:, :, 2].min()),
-                                     parts[i][0]))
+def _height(parts, i):
+    """sort key: where a part's underside sits, then its label for a stable tie."""
+    return (float(parts[i][1][:, :, 2].min()), parts[i][0], i)
 
 
 def from_grounded(parts, marks, tol):
-    """parts in build order: outward from the grounded part, fasteners last.
+    """parts in build order: up from the grounded parts, fasteners last.
 
-    a breadth-first walk of the contact graph starting at the grounded part, so
-    every piece arrives attached to something already there rather than floating
-    into position - which is what "assembled" looks like and what a z-sort only
-    accidentally achieves. neighbours are taken lowest-first so a course of
-    boards lays itself in a readable direction, and the walk restarts at the
-    lowest unvisited part when the model is in several disconnected pieces.
+    the grounded parts land first - they are the datum the rest is placed
+    against - and then the model grows by repeatedly taking the lowest part that
+    touches what is already there. contact is what stops a piece arriving
+    floating, which is what "assembled" looks like and what a z-sort only
+    accidentally achieves; height is what makes it a course at a time rather than
+    a ring at a time. the walk restarts at the lowest unplaced part when the
+    model is in several disconnected pieces.
 
     parts flagged `embeds` are held back to the end regardless of where they sit
     in the graph. they are fasteners: a screw driven before the board it holds is
@@ -154,23 +164,28 @@ def from_grounded(parts, marks, tol):
     near = touching(parts, tol)
     structural = {i for i in range(len(parts)) if not fastener[i]}
 
-    seq, seen = [], set()
-    queue = [i for i in sorted(anchors) if i in structural]
-    while len(seen) < len(structural):
-        if not queue:
-            queue = [_lowest(parts, structural - seen)]
-        i = queue.pop(0)
-        if i in seen:
-            continue
+    seq, seen, reachable = [], set(), []
+
+    def place(i):
         seen.add(i)
         seq.append(i)
-        queue += sorted(near[i] & structural - seen,
-                        key=lambda k: (float(parts[k][1][:, :, 2].min()),
-                                       parts[k][0]))
+        for k in near[i] & structural - seen:
+            heapq.heappush(reachable, _height(parts, k))
+
+    for i in sorted((a for a in anchors if a in structural),
+                    key=lambda a: _height(parts, a)):
+        place(i)
+    while len(seen) < len(structural):
+        if not reachable:
+            place(min(structural - seen, key=lambda k: _height(parts, k)))
+            continue
+        _, _, i = heapq.heappop(reachable)
+        if i not in seen:
+            place(i)
     # then the fasteners, each following the structure it fastens to.
-    place = {i: n for n, i in enumerate(seq)}
+    landed = {i: n for n, i in enumerate(seq)}
     rest = [i for i in range(len(parts)) if fastener[i]]
-    rest.sort(key=lambda i: (min((place[k] for k in near[i] if k in place),
+    rest.sort(key=lambda i: (min((landed[k] for k in near[i] if k in landed),
                                  default=len(seq)), parts[i][0]))
     return [parts[i] for i in seq + rest]
 
