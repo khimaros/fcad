@@ -34,7 +34,7 @@ def main(argv):
       vanished outright. so we print those ourselves and exit 1."""
     _bootstrap()
     try:
-        _route(argv[0] if argv else "all")
+        _route(argv[0] if argv else "all", argv[1:])
     except SystemExit as e:
         if not isinstance(e.code, str):
             raise
@@ -44,8 +44,13 @@ def main(argv):
         sys.stdout.flush()
 
 
-def _route(cmd):
-    if cmd == "view":
+def _route(cmd, args=()):
+    if cmd == "test":
+        # a project test, run here rather than directly under freecadcmd so it
+        # inherits the sys.path bootstrap above and can import fcad.testing.
+        from fcad.freecad import run_test
+        run_test.main(args[0])
+    elif cmd == "view":
         from fcad.freecad import view
         view.main()
     elif cmd == "view-parts":

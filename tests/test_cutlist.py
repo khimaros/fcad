@@ -39,13 +39,13 @@ def compute(p):
     r, s = p["rail_len"], p["stile_len"]
     box = lambda l: (lambda: Part.makeBox(l, 50, 50))
     return [
-        fcad.Part("rail", placements=[App.Placement()] * 3, length=r,
-                  profile="2x4", solid=box(r)),
-        fcad.Part("stile", placements=[App.Placement()] * 2, length=s,
-                  profile="2x4", solid=box(s)),
+        fcad.PartSpec("rail", placements=[App.Placement()] * 3, length=r,
+                      profile="2x4", solid=box(r)),
+        fcad.PartSpec("stile", placements=[App.Placement()] * 2, length=s,
+                      profile="2x4", solid=box(s)),
         # no stock declared for this profile: the cut list must skip it.
-        fcad.Part("pin", placements=[App.Placement()] * 10, length=50.0,
-                  profile="dowel", solid=box(50.0)),
+        fcad.PartSpec("pin", placements=[App.Placement()] * 10, length=50.0,
+                      profile="dowel", solid=box(50.0)),
     ]
 '''
 

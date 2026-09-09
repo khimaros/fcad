@@ -59,8 +59,11 @@ def export_svg(objs, path):
 # what a viewer should show: the solids of a part file, and the links plus the
 # container of an assembly. sketches, varsets, origins and joints stay hidden -
 # they are inputs and decoration, not the model.
+# what a viewer should show when the file opens. `PartDesign::Body` is the one
+# you see for a declared part - its own features carry shapes too, and showing
+# those as well would draw the part once per feature.
 VISIBLE_TYPES = ("App::Link", "Assembly::AssemblyObject", "Part::Extrusion",
-                 "Part::Feature", "Part::FeaturePython")
+                 "Part::Feature", "Part::FeaturePython", "PartDesign::Body")
 
 # freecad's isometric orientation (rotation axis then angle); it describes a
 # direction, so it is the same for every model whatever its size.
@@ -460,15 +463,21 @@ def export_dxf(doc, sources, path):
     TechDraw.writeDXFPage(page, path)
 
 
-def export_sketch(doc, sketch, stem):
-    """export a defining sketch as svg and dxf (the part's 2d profile).
+def export_sketch(doc, sketches, stem):
+    """export the defining sketch(es) as svg and dxf (the part's 2d profile).
+
+    a sketch-derived part is described by more than one - the padded outline and
+    a bore sketch per hole feature - and they are exported together because
+    together they are the profile. these are the body's own sketches, not a
+    drawing of it, so what ships cannot disagree with what was built.
 
     svg comes straight from the sketch (headless ok); dxf goes through TechDraw
     like every other dxf, since the offline importDXF exporter is unavailable."""
+    objs = list(sketches) if isinstance(sketches, (list, tuple)) else [sketches]
     import importSVG
-    importSVG.export([sketch], stem + ".svg")
+    importSVG.export(objs, stem + ".svg")
     import TechDraw
-    page = _page(doc, [sketch], TOP_VIEW, tag="_sk")
+    page = _page(doc, objs, TOP_VIEW, tag="_sk")
     TechDraw.writeDXFPage(page, stem + ".dxf")
 
 

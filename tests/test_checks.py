@@ -12,7 +12,9 @@ correctly:
   fit a cavity.
 - `find_unsupported` - a part with nothing under it.
 - `find_voids` - a cut larger than the joint it relieves. two members that cross
-  need one of them to give way over exactly what they share, and no more.
+  need one of them to give way over exactly what they share, and no more. a cut
+  the project calls an `opening` is not one of these: a nut's bore is the point
+  of the part, and no geometry distinguishes it from a lap cut too wide.
 - `find_disjoint` - a part severed by its own joinery, which is still a
   perfectly valid shape.
 
@@ -130,6 +132,8 @@ def main():
 
     checks.extend(_support_checks())
     checks.extend(_void_checks())
+    checks.extend(_opening_checks())
+    checks.extend(_undrilled_checks())
     checks.extend(_disjoint_checks())
     return report(checks)
 
@@ -142,6 +146,29 @@ class _StackSpec:
         self.placements = placements
         self.grounded = grounded
         self.embeds = embeds
+
+
+class _DeclaredSpec:
+    """a spec whose geometry is a real feature tree, as a project's would be."""
+
+    def __init__(self, name, placements, points, thickness, holes=(),
+                 grounded=False, embeds=False, openings=()):
+        self.name = name
+        self.placements = placements
+        self.grounded = grounded
+        self.embeds = embeds
+        self.openings = list(openings)
+        self.declared = True
+        self._geom = (points, thickness, list(holes))
+
+    def build_into(self, doc, body):
+        from fcad.freecad.partdesign import pad_and_bore
+        points, thickness, holes = self._geom
+        return pad_and_bore(doc, body, points, thickness, holes, name=self.name)
+
+    def solid(self):
+        from fcad.freecad.partdesign import shape_of
+        return shape_of(self)
 
 
 class _Stack:
@@ -250,6 +277,110 @@ def _void_checks():
     out.append(("a bar relieved far past the crossing is caught (%s)"
                 % ([n for n, _, _ in loose],),
                 [n for n, _, _ in loose] == ["bar"]))
+    return out
+
+
+class _Bored:
+    """a plate with one big bore through it: a nut, not a joint.
+
+    the bore is a real `PartDesign::Hole` in the part's own tree, so nothing has
+    to be told it exists. what fcad cannot see is whether it is *meant* to stay
+    empty - a nut's bore and a lap relieved twice as wide as its crossing member
+    are both a feature that removed material - so the project says so with
+    `openings`. the bore is far too big to hide under the budget either way:
+    5.6% of the blank against a 1% void allowance."""
+
+    name = "tbore"
+    PLATE = (75.0, 75.0, 30.0)
+    BORE = 20.0
+
+    def __init__(self, opening=True):
+        self._opening = opening
+
+    def compute(self, values):
+        l, w, t = self.PLATE
+        pts = [(-l / 2, -w / 2), (l / 2, -w / 2), (l / 2, w / 2), (-l / 2, w / 2)]
+        return {"specs": [_DeclaredSpec(
+            "hex", [App.Placement()], pts, t, [(0.0, 0.0, self.BORE)],
+            grounded=True, openings=["hex_bore1"] if self._opening else [])]}
+
+    def from_spec(self, spec):
+        return spec.solid()
+
+    def profile(self, spec):
+        return None
+
+    def defaults(self):
+        return {}
+
+
+class _Dimensioned:
+    """a part that hands over a solid and dimensions circles on its drawing.
+
+    the declared path cannot get this wrong - the dimension is read back out of
+    the bore, so there is nothing to disagree with. a part supplying its own
+    solid still names circles separately from cutting them, which is the gap
+    R3.1.2 is about: drainage on the drawing and none in the wood."""
+
+    name = "tdim"
+    PLATE = (60.0, 60.0, 20.0)
+    BORE = 10.0
+
+    def __init__(self, bored=True):
+        self._bored = bored
+
+    def compute(self, values):
+        spec = _StackSpec("plate", [App.Placement()], grounded=True)
+        spec.dimension_circles = [(0.0, 0.0, self.BORE)]
+        return {"specs": [spec]}
+
+    def from_spec(self, spec):
+        l, w, t = self.PLATE
+        plate = Part.makeBox(l, w, t, V(-l / 2.0, -w / 2.0, -t / 2.0))
+        if not self._bored:
+            return plate
+        return plate.cut(Part.makeCylinder(self.BORE / 2.0, t + 2.0,
+                                           V(0, 0, -t / 2.0 - 1.0)))
+
+    def profile(self, spec):
+        return None
+
+    def defaults(self):
+        return {}
+
+
+def _undrilled_checks():
+    """R3.1.2: a circle on the drawing that is not in the solid.
+
+    only a part that names its circles apart from cutting them can fail this,
+    which since the geometry moved into the feature tree means a part supplying
+    its own `solid`. it is still exactly the planter's case."""
+    out = []
+    clean = build_assembly.find_undrilled(_Dimensioned(), {})
+    out.append(("a dimensioned circle that is bored is clean (%s)"
+                % (clean or "clean",), not clean))
+    bad = build_assembly.find_undrilled(_Dimensioned(bored=False), {})
+    out.append(("one dimensioned and never bored is caught (%s)" % (bad,),
+                [n for n, _, _ in bad] == ["plate"]))
+    return out
+
+
+def _opening_checks():
+    """a cut the project calls an opening is not material gone astray.
+
+    the void check asks whether a part gave up material nothing fills, which is
+    exactly right for joinery and exactly wrong for a bore that is the point of
+    the part. the geometry cannot tell them apart - both are a subtractive
+    feature - so `openings` is the project saying which. the same bore, not
+    declared an opening, is still caught."""
+    out = []
+    void = build_assembly.find_voids(_Bored(), {})
+    out.append(("a bore declared an opening is not an unfilled void (%s)"
+                % (void or "clean",), not void))
+    undeclared = build_assembly.find_voids(_Bored(opening=False), {})
+    out.append(("the same bore not declared one is still caught (%s)"
+                % ([n for n, _, _ in undeclared],),
+                [n for n, _, _ in undeclared] == ["hex"]))
     return out
 
 

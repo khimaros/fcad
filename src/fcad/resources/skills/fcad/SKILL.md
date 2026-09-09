@@ -1,6 +1,6 @@
 ---
 name: fcad
-description: the fcad instrumentation package and its `fcad` cli - the project contract (PARAMS + compute, fcad.Part, PARAM_META/FEM/MATERIAL/STOCK), build targets, dist/ layout, check/fem/cutlist/diff/animate. use whenever a `.fcad` file,  exposing PARAMS+compute, the `fcad` command  - including "add a part", "add a parameter", "why is check failing", "run the fem", "what lumber do i buy", "animate the assembly". this covers fcad's own contract only, not the FreeCAD API itself.
+description: the fcad instrumentation package and its `fcad` cli - the project contract (PARAMS + compute, fcad.PartSpec, PARAM_META/FEM/MATERIAL/STOCK), build targets, dist/ layout, check/fem/cutlist/diff/animate. use whenever a `.fcad` file,  exposing PARAMS+compute, the `fcad` command  - including "add a part", "add a parameter", "why is check failing", "run the fem", "what lumber do i buy", "animate the assembly". this covers fcad's own contract only, not the FreeCAD API itself.
 ---
 
 # fcad
@@ -13,6 +13,13 @@ and fcad infers the rest.
 **scope.** this skill is fcad's contract, cli and conventions. it deliberately
 does not cover the FreeCAD api. the FreeCAD 1.1.1 gotchas fcad has already
 absorbed live in `fcad/CONTRIBUTING.md`; read that before rediscovering one.
+
+**`README.md` ships beside this file** and is fcad's user documentation: the same
+contract at length, plus the parts this skill only points at - the 3d diff and
+its git driver, FEM tuning and its memory limits, the cut list, and a
+`## migrating` section listing what has changed and what is about to. this file
+is the dense version and the traps; read the README when you need the long form,
+rather than assuming this one omitted something on purpose.
 
 ## the shape of the thing
 
@@ -34,15 +41,37 @@ a whole project can be one file: a directory's `project.py`, or a standalone
 registered source suffix).
 
 ```python
-import fcad, Part, FreeCAD as App
+from FreeCAD import Placement
 
-PARAMS = {"length": 100.0, "width": 60.0, "height": 20.0}
+import fcad
+from fcad.freecad import partdesign
+
+PARAMS = {"length": 100.0, "width": 60.0, "height": 20.0, "bore": 12.0}
+
+def _block(doc, body, p):
+    l, w = p["length"] / 2.0, p["width"] / 2.0
+    partdesign.pad_and_bore(doc, body, [(-l, -w), (l, -w), (l, w), (-l, w)],
+                            p["height"], [(0.0, 0.0, p["bore"])], name="block")
 
 def compute(p):
-    l, w, h = p["length"], p["width"], p["height"]
-    return [fcad.Part("block", placements=[App.Placement()],
-                      solid=lambda: Part.makeBox(l, w, h, App.Vector(-l/2, -w/2, -h/2)))]
+    return [fcad.PartSpec("block", placements=[Placement()], length=p["length"],
+                          build=lambda doc, body: _block(doc, body, p),
+                          dimension_sketches=["block_bore1"],
+                          openings=["block_bore1"])]
 ```
+
+**that part is a `PartDesign::Body`** - fully-constrained sketch, `Pad`, one
+`PartDesign::Hole` per bore - and `build` is where you write real FreeCAD code.
+`pad_and_bore` is a helper for the commonest shape, not a layer: the turned screw
+in `examples/fastenplates` ignores it. see "the well-lit path" below, and reach
+for `solid=` only when the part is not a body at all.
+
+`Part` and `FreeCAD` are FreeCAD's own modules: they import by name because a
+project runs inside FreeCAD, not because fcad puts them there - a project module
+is loaded as ordinary python and nothing is injected into it. import the names
+used rather than aliasing (`FreeCAD as App` is the wiki's habit, not a rule).
+**FreeCAD's `Part` and fcad's `fcad.PartSpec` are unrelated** - the geometry kernel
+against the part spec - so the `fcad.` prefix is what keeps them apart.
 
 `compute` returns a bare list of parts, or a dict `{"specs": [...], ...}` when it
 wants to hand derived values along. required: `PARAMS` + `compute`. everything
@@ -54,32 +83,61 @@ else is optional refinement:
 | `FEM` | per-target analysis cases (below) |
 | `MATERIAL` / `MATERIALS` | project-wide fem material default / named registry |
 | `STOCK` | buyable stock lengths per bom profile (below) |
-| `FROM_SPEC` / `PROFILE` | realize a spec that is not an `fcad.Part` |
+| `FROM_SPEC` / `PROFILE` | realize a spec that is not an `fcad.PartSpec` |
 | `CONSTRAINTS` | predicates saying when the model still means what it says |
+| `ASSEMBLE` | joint the assembly yourself (below) instead of Fixed-to-datum |
 | `NAME`, `SCHEMA`, `ENUM_CHOICES` | override the inferred name/varset/dropdowns |
 
 each is read as the UPPER_CASE constant or the lowercase `Project` kwarg name,
 so `PARAMS` + `def compute` is idiomatic. an explicit
 `PROJECT = fcad.Project(...)` is always supported and never removed.
 
-### fcad.Part
+### fcad.PartSpec
 
 ```
-fcad.Part(name, placements, solid=None, profile2d=None, profile="",
-          holes=(), fastener_holes=(), length=None, grounded=False, embeds=False)
+fcad.PartSpec(name, placements, build=None, solid=None, profile="", length=None,
+              grounded=False, embeds=False, dimension_sketches=(),
+              dimension_circles=(), openings=(), profile2d=None)
 ```
 
+**geometry - exactly one of these:**
+
+- `build` - `(doc, body) -> None`: your own FreeCAD code, called with a live
+  document and an empty `PartDesign::Body`. anything PartDesign can do, including
+  features fcad has never heard of. lazy, like `solid`. this is the path to take.
 - `solid` - a **thunk** returning the BREP solid in the part's own unplaced
-  frame. lazy on purpose: the bom, cutlist and schema passes never realize it,
-  so keep the booleans inside the thunk.
-- `profile2d` - `(points, thickness)` for the defining sketch. `check` demands it
-  come out **fully constrained**, so emit one closed outline rather than a shape
-  minus cutters (the planter's notched floor board is a single octagon for this).
+  frame, for geometry that is not a body at all: imported, or built with plain
+  `Part` booleans. lazy on purpose: the bom, cutlist and schema passes never
+  realize it, so keep the booleans inside the thunk.
+
+**the bom:**
+
 - `profile` - the bom label (e.g. a nominal lumber name); also the `STOCK` key.
-- `holes` - `(cx, cy, dia)` circles that get dimensioned on the drawing.
-  `fastener_holes` are sketch-only, so screw holes stay out of the dimensions.
-- `length` - the bom length; defaults to the solid's bbox **X-extent**, so state
-  it explicitly whenever stock length is not the X-extent.
+- `length` - the bom length. defaults to the built shape's bbox **X-extent**,
+  which means *building geometry*: state it on any model you sweep, or every
+  `optimize` candidate pays for a solid just to read a bounding box.
+
+**the drawing, which is not the geometry:**
+
+- `dimension_sketches` - names of the part's own sketches whose circles get
+  dimensioned. fcad reads them back out of the built tree, so a dimension cannot
+  disagree with the bore it came from. a fastener hole is simply not listed.
+- `dimension_circles` - `(cx, cy, dia)` for a part supplying `solid`, which has
+  no sketches to read. these are drawn on its exported defining sketch as well,
+  which is safe because (6) asserts each is actually bored - the sketch fcad used
+  to draw carried an unvalidated list, and that is what made it a second
+  description rather than a view of the part.
+
+**intent the geometry does not carry:**
+
+- `openings` - which cuts are *meant* to stay empty. `check` asks whether a part
+  gave up material nothing fills; that is right for a lap cut twice as wide as
+  its crossing member and wrong for a nut, and both are just a subtractive
+  feature. sketch names for a part with a tree, `(cx, cy, dia)` circles for one
+  supplying `solid`.
+- `profile2d` - `(points, thickness)`: the stock a part is cut from, **only** for
+  a part supplying `solid`, where fcad cannot derive a blank from a tree. a
+  declared part needs none of this.
 - `grounded` - anchors the assembly. nothing flagged means the first part is
   auto-grounded, so a minimal project still passes `check`.
 - `embeds` - excluded from the interference check and the fem fuse. anything that
@@ -94,6 +152,108 @@ drives screws home midway up the stack. no separate annotation exists or is
 needed for this.
 
 a project may return its own duck-typed spec instead, exposing the same surface.
+
+### the well-lit path: a part is its feature tree
+
+a part with `build` and **no** `solid` is *declared*: FreeCAD builds it as a
+`PartDesign::Body` and fcad reads the shape back, so there is one description of
+the part and no second implementation to drift from. `dist/parts/<name>.FCStd`
+is that body - every sketch fully constrained. prefer this.
+
+`build` gets a live document and an empty `PartDesign::Body`, and what goes in is
+**real FreeCAD code**:
+
+```python
+from fcad import types
+from fcad.freecad import partdesign
+
+def post(doc, body):
+    sk = partdesign.add_sketch(doc, body, "outline", points=pts, z=-t/2)
+    pad = body.newObject(types.PartDesign.Pad, "pad")
+    pad.Profile = sk
+    pad.Length = t
+    doc.recompute()                    # each feature reads the previous shape
+    groove = partdesign.add_sketch(doc, body, "groove", points=slot, z=t/2)
+    pocket = body.newObject(types.PartDesign.Pocket, "groove_cut")
+    pocket.Profile = groove
+    pocket.Length = 6.0
+    doc.recompute()
+
+fcad.PartSpec("post", placements=[...], build=post)
+```
+
+**there is no `fcad.Feature` and no `fcad.Sketch`** - no vocabulary to learn and
+nothing standing between a project and the workbench. anything fcad defined would
+be a smaller, lossier copy of FreeCAD's object model, and would be exactly what
+blocks the feature its author did not think of. `PartDesign::Fillet` on an edge
+of an earlier feature works here and could not be expressed by any fcad-side
+description of a part.
+
+`fcad.freecad.partdesign` offers two helpers, to call or to crib from:
+`add_sketch(doc, body, name, points=, circles=, z=, placement=)` emits a
+**fully-constrained** sketch (which `check` requires), and
+`pad_and_bore(doc, body, points, thickness, holes, name=)` is the shape most
+parts are. neither is a layer - they make the calls you would make, and the
+turned screw in `examples/fastenplates` ignores both. a project wanting arcs,
+splines or constraints between elements calls Sketcher directly.
+
+why it is not just tidier. a part used to be described *twice* - `holes` said
+where the bores were while the project cut them separately, and `profile2d` was
+an outline drawn beside a solid it might not match - and `check` carried two
+assertions whose only job was to police that gap. both are gone: a bore that *is*
+a feature cannot be declared-and-not-bored, and a sketch that *is* what was
+padded cannot drift from it. that is two checks deleted rather than passing. a
+body is also the only representation a person can open and edit: a
+`Part::Feature` is a shape in a bag.
+
+and `PartDesign::Hole` carries what a `Part.Shape` throws away - `DepthType`
+(`Dimension`/`ThroughAll`), `HoleCutType` (counterbore/countersink/counterdrill),
+`ThreadType` (ISO metric, UNC, NPT, BSP...), `Threaded`, `DrillPoint`. a bore cut
+as a boolean is just a cylindrical face afterwards; a Hole knows it is a hole.
+
+pass `solid=` for geometry no feature tree describes - imported, scripted, or
+swept from something fcad cannot name. those parts keep the plain
+`Part::Feature`. `examples/fastenplates` has one of each: a declared plate and a
+turned screw.
+
+**the cost, so you can weigh it:** a declared part is built by a real recompute,
+about 17 ms against 3 ms for hand-rolled booleans, and its *blank* costs one more
+recompute per feature (below). `check` pays that once per part - a pre-commit
+gate, so fine. the bom, the cut list and `optimize` pay nothing **provided the
+part states `length=`**; without it the fallback builds the shape to read a
+bounding box, once per part per candidate, and a sweep that was 0.2s becomes
+minutes.
+
+**the blank, and why it is now right.** a part's blank - itself before its
+joinery - is found by suppressing every feature whose removal gives material
+back, and recomputing. FreeCAD will not tell you which those are (`AddSubType` is
+not exposed, and Pad, Pocket, Hole and Fillet all derive from
+`PartDesign::FeatureAddSub`), so fcad asks the geometry instead. that needs no
+vocabulary and is right about a Pocket, a Groove and a dressup Fillet without
+fcad knowing what any of them are. it replaced an outline-and-thickness blank
+that could only ever express a hole, which is why a groove or a lap used to read
+as material the part had lost and nothing had accounted for.
+
+**what the geometry still cannot say is which cuts are *meant* to be empty.** a
+nut's bore and a lap relieved twice as wide as its crossing member are both a
+subtractive feature; only the project knows the first is the point of the part.
+that is `openings`, and it is the one declaration that survived - it is intent,
+not a second description of geometry.
+
+three gotchas when writing a `build`, each of which fails quietly rather than
+loudly: a feature's properties can only be set once it has a base ("No base set,
+no sketch support either"), so create it in the body first; the previous feature
+must be recomputed before the next is added ("Base feature's TopoShape is
+invalid"), so `doc.recompute()` between them; and a cut whose profile sits on the
+far face needs `Reversed` set correctly or it runs away from the material - it
+succeeds, reports `Up-to-date`, and removes nothing at all. a bore sketched on
+the -Z face wants `Reversed=True`, a pocket sketched on the +Z face wants it left
+alone.
+
+when a feature must name an edge or face of an earlier one, **pick it by geometry
+rather than by `EdgeN`** - enumerate `pad.Shape.Edges`, filter on a predicate,
+and use the index you found. that is the same rule `fem_select` follows for FEM
+faces, and it is what keeps a model from breaking when the topology renumbers.
 
 ### varset schema inference
 
@@ -157,7 +317,7 @@ assembly knows how many of a part there are).
 3. every `embeds` part is seated: it displaces nothing, and something holds it
 4. every part is grounded, fastened, or resting on another
 5. no part cuts away more material than anything fills
-6. every hole a part declares is actually bored in it
+6. every circle a part dimensions is actually bored in it
 7. every part is one connected solid
 8. every assembly component is grounded or jointed
 9. every defining sketch is fully constrained
@@ -168,10 +328,18 @@ moot.
 
 **(3) to (7) look for the absence of geometry, which (2) is structurally unable
 to see.** a fastener that fits no hole, a part with nothing under it, a cut
-larger than the joint it relieves, a hole dimensioned on the drawing and never
-made, a part severed by its own joinery: every one of those renders correctly,
-exports correctly, and passes an interference test. that is the whole reason
-they exist, and they were each written after a real model shipped the failure.
+larger than the joint it relieves, a circle dimensioned and never made, a part
+severed by its own joinery: every one of those renders correctly, exports
+correctly, and passes an interference test. that is the whole reason they exist,
+and they were each written after a real model shipped the failure.
+
+(6) can only fail on a part that hands over its own `solid`, since that is the
+only kind that still names its circles apart from cutting them. a declared part's
+dimensions are read back out of its bores, so there is nothing to disagree with.
+
+**one assertion used to live here and is gone rather than passing**: a note about
+an outline the solid does not match. it policed the gap between a part's two
+descriptions, and a declared part has one - the sketch *is* what was padded.
 
 notes on the ones with judgement in them:
 - (3) reports `interferes` (exact) apart from `unseated` (a nudge test, so a
@@ -180,16 +348,18 @@ notes on the ones with judgement in them:
   something" is a claim about a physical stack, and plenty of models are not
   one. a part with an `embeds` part through it counts as fastened.
 - (5) budgets the void as a fraction of the part's own blank, because real
-  clearances scale with the part and a mistake does not.
-- `check` also *notes* (without failing) a part that loses more than 5% of its
-  defining outline to joinery: its sketch is documenting stock, not the part.
+  clearances scale with the part and a mistake does not. it measures against the
+  blank with the part's `openings` still cut, so what it sees is joinery alone -
+  a nut's bore is the point of the nut, and nothing in the geometry says so.
 
 ## what lands in dist/
 
 ```
 parts/<name>.{FCStd,step,stl,svg,dxf}
 drawings/<name>.dxf   drawings/assembly.dxf     dimensioned techdraw sheets
-sketches/<name>.{svg,dxf}                       defining sketches, parts only
+sketches/<name>.{svg,dxf}    defining sketches, parts only. a declared part's own;
+                             else its `profile`/`profile2d` outline plus the
+                             circles it names in `dimension_circles`
 <name>.{FCStd,step,stl,svg,dxf}                 the linked assembly + exports
 <name>-bom.csv          part,qty,profile,length_mm
 <name>-cutlist.csv      profile,pattern,stock_mm,boards,cut_mm,per_board,offcut_mm
@@ -206,6 +376,41 @@ flags. every assembly build writes them whatever formats were asked for.
 
 the assembly `.FCStd` is a real Assembly-workbench assembly: each instance is an
 `App::Link` into its part file, grounded or Fixed-jointed and solved.
+
+### ASSEMBLE: jointing it yourself
+
+fcad grounds the parts flagged `grounded` and mates every other instance to the
+datum with a **Fixed** joint. that is the honest default for a model whose
+positions python already computed - there is nothing left for the solver to
+resolve, and a joint that named a face would drag in the topological naming
+problem fcad avoids everywhere else. but Fixed is one of **thirteen** joint
+types this FreeCAD ships (`Fixed, Revolute, Cylindrical, Slider, Ball, Distance,
+Parallel, Perpendicular, Angle, RackPinion, Screw, Gears, Belt`), and a hinge is
+not a fixed joint.
+
+declare `assemble` and you own the jointing. fcad has already created the links
+and grounded the anchors; you get the real `Assembly::AssemblyObject`:
+
+```python
+def assemble(doc, asm, links):
+    """links: {"base": [Link_001], "arm": [Link_001, Link_002], ...}"""
+    import JointObject                       # /usr/share/freecad/Mod/Assembly
+    from fcad.freecad import build_assembly as asmlib
+
+    joints = doc.getObject("Joints")
+    j = joints.newObject("App::FeaturePython", "Rev_arm")
+    JointObject.Joint(j, asmlib.joint_type(JointObject, "Revolute"))
+    j.Reference1 = asmlib.whole_of(asm, links["base"][0])
+    j.Reference2 = asmlib.whole_of(asm, links["arm"][0])
+```
+
+fcad adds **no** Fixed joints when a hook is present - one owner at a time, so
+there is no over-constraint puzzle. call
+`build_assembly.fix_to_datum(JointObject, asm, joints, datum, links)` for the
+instances you do not want to joint yourself; that is exactly fcad's default.
+
+`check`'s "every component is grounded or jointed" still applies, and a custom
+joint satisfies it - the hook is not an escape from the assertion.
 
 ## FEM
 
@@ -321,8 +526,17 @@ def main():
 testing.main(main, __file__)
 ```
 
-plus `solids`, `blanks`, `extent`, `overlap`, `near` - the vocabulary every
-project's tests turned out to need.
+plus `shape`, `solids`, `blanks`, `extent`, `overlap`, `near` - the vocabulary
+every project's tests turned out to need. they read a project however it declares
+itself: a `compute` returning the bare list or the dict form, and specs realized
+by a module-level `from_spec` or by the `fcad.PartSpec`'s own `solid()` thunk.
+
+the import needs no preamble. FreeCAD's embedded interpreter ignores PYTHONPATH,
+so a test handed straight to freecadcmd cannot resolve `fcad` at all - which is
+why projects hand-rolled a `sys.path` insert pointing at the fcad checkout.
+`fcad test` runs each test through the same bootstrap the build path uses
+instead, so `from fcad import testing` just works. `examples/fastenplates/tests/`
+is the whole shape of it.
 
 ## STOCK and the cut list
 
@@ -374,13 +588,17 @@ Macro menu.
 ## traps that are fcad's own
 
 - **never `.translate()` to center a solid.** bake centering into the geometry
-  (`Part.makeBox(l, w, t, App.Vector(-l/2, -w/2, -t/2))`). translate sets the
+  (`Part.makeBox(l, w, t, Vector(-l/2, -w/2, -t/2))`). translate sets the
   shape's Placement, which the assembly clobbers when it assigns the instance
   Placement - parts end up offset by half their size and rotating about the wrong
   point.
-- `solid` is a thunk. work done outside it runs on every metadata-only pass.
-- a part with `profile2d` must yield a fully constrainable closed outline, or
-  `check` fails on it.
+- `solid` is a thunk, and so is `build`. work done outside them runs on every
+  metadata-only pass.
+- every sketch a `build` emits must come out **fully constrained** or `check`
+  fails on it. `partdesign.add_sketch` does that for outlines and circles;
+  hand-written Sketcher code has to do its own.
+- **state `length=` on any model you sweep.** without it the bom builds the
+  part's shape to read a bounding box, and `optimize` does that per candidate.
 - forget `embeds=True` on a fastener and `check` reports it as interference.
 - `length` defaults to the bbox X-extent; mitered or rotated parts usually need
   it stated.

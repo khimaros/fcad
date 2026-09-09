@@ -49,7 +49,7 @@ def compute(p):
     box = Part.makeBox(p["length"], 40.0, 20.0)
     places = [App.Placement(App.Vector(0, i * 60.0, 0), App.Rotation())
               for i in range(int(p["qty"]))]
-    return [fcad.Part("bar", solid=lambda: box, placements=places)]
+    return [fcad.PartSpec("bar", solid=lambda: box, placements=places)]
 '''
 NAME = "widget"
 WIDTH, THICK, PITCH = 40.0, 20.0, 60.0

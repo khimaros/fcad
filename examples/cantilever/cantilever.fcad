@@ -24,8 +24,14 @@ plain prismatic beam that the inferred default (bbox diagonal / 20) lands inside
 needs gmsh and ccx on PATH.
 """
 
+# `Placement` is FreeCAD's own: it imports by name because a .fcad is executed
+# inside FreeCAD, and fcad injects nothing into a project's namespace. the beam
+# is declared rather than built, so nothing else from the kernel is needed.
+from FreeCAD import Placement
+
+import fcad
 from fcad import fem_select as fs
-import fcad, Part, FreeCAD as App
+from fcad.freecad import partdesign
 
 PARAMS = {"length": 300.0, "width": 30.0, "height": 20.0, "tip_load": 500.0}
 
@@ -49,15 +55,14 @@ def _outline(length, width):
     return [(-l, -w), (l, -w), (l, w), (-l, w)]
 
 
-def _solid(points, height):
-    face = Part.Face(Part.makePolygon(
-        [App.Vector(x, y, -height / 2.0) for x, y in points + points[:1]]))
-    return face.extrude(App.Vector(0, 0, height))
+def _beam(doc, body, length, width, height):
+    """a plain prismatic bar: the outline padded, nothing cut."""
+    partdesign.pad_and_bore(doc, body, _outline(length, width), height,
+                            name="beam")
 
 
 def compute(p):
-    points = _outline(p["length"], p["width"])
-    return [fcad.Part("beam", profile="%gx%g bar" % (p["width"], p["height"]),
-                      placements=[App.Placement()],
-                      solid=lambda: _solid(points, p["height"]),
-                      profile2d=(points, p["height"]))]
+    l, w, h = p["length"], p["width"], p["height"]
+    return [fcad.PartSpec("beam", profile="%gx%g bar" % (w, h),
+                          placements=[Placement()], length=l,
+                          build=lambda doc, body: _beam(doc, body, l, w, h))]

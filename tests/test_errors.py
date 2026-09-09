@@ -39,8 +39,8 @@ PARAMS = {"size": %(size)r}
 
 def compute(p):
     solid = lambda: Part.makeBox(p["size"], p["size"], p["size"])
-    return [fcad.Part("a", solid=solid, placements=[App.Placement()]),
-            fcad.Part("b", solid=solid, placements=[
+    return [fcad.PartSpec("a", solid=solid, placements=[App.Placement()]),
+            fcad.PartSpec("b", solid=solid, placements=[
                 App.Placement(App.Vector(%(offset)r, 0, 0), App.Rotation())])]
 '''
 NAME = "clash"

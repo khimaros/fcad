@@ -1,5 +1,63 @@
 # roadmap
 
+## next
+
+- **predicates for edges and faces, so nobody writes `Edge7`.** everything
+  PartDesign can do is reachable now that a part writes its own FreeCAD code, but
+  a feature referencing a *derived* edge or face - a fillet, a chamfer, a sketch
+  attached to a face - still has to name it, and a name is what the topological
+  naming problem breaks. `tests/test_partdesign.py` shows the workaround:
+  enumerate `pad.Shape.Edges`, filter on a predicate, use the index. that pattern
+  belongs in fcad next to `fem_select`, which already does exactly this for FEM
+  faces. the work is the vocabulary of predicates and deciding what happens when
+  one matches zero or many.
+
+- **`add_sketch` covers outlines and circles only.** a project needing arcs,
+  splines or construction geometry drops to Sketcher directly, which works but
+  is where the constraint bookkeeping gets tedious. worth extending the helper,
+  carefully: it exists to make full constraint easy, not to become a sketch API.
+
+- **the unchecked description is the thing to hunt, not the duplicate one.**
+  planter's `_inplane_holes` reconstructed sketch circles from its screw tools by
+  axis test, point-in-polygon and a 0.5 mm dedup, and fed a sketch that nothing
+  validated against the solid. that is the pattern worth naming: not that a part
+  was described twice, but that one of the descriptions was *found* rather than
+  *declared*, and asserted by nothing. a part may be described any number of
+  times as long as every description is derived from the geometry or checked
+  against it - which is exactly why `dimension_circles` can be drawn on a sketch
+  (`find_undrilled` asserts each is bored) where the old `holes` could not.
+
+- **fcad bores the holes a project supplies a `solid` for.** for a declared part
+  this is done: fcad pads and bores it. a project that hands over its own solid
+  still cuts its own `holes`, and that loop is written the same way in both
+  planters ("boring it is the project's job, so it has to happen here or a board
+  carries its drainage on the drawing and none in the wood"). fcad could cut the
+  declared circles for them too - the cut is idempotent, so a project that keeps
+  its loop is unaffected - which would make `find_undrilled` impossible to fail
+  rather than merely checked. `fastener_holes` stay the project's either way,
+  since their real geometry is a stepped tool and the declared circle is only its
+  sketch annotation.
+
+- **a part cannot be drilled differently per instance, and that shipped a bug.**
+  the contract is one solid times N placements, so planter derives its screw
+  tools from `placements[0]` alone (in `_screw_tools`) and its three mirrored
+  corners inherit the first corner's holes: 51 of 180 screws driven through
+  undrilled post material, 465 mm^3 each.
+
+  **it was never hidden, which is the more useful lesson.** planter had it in its
+  backlog ("per-corner mirror-image hole patterns blocked reusable part files")
+  and its own layout test compared the drilled patterns *up to sign* on purpose,
+  with a comment naming the limitation. so it was known, written down twice, and
+  passing - because nothing **asserted** it. it stayed a paragraph in a backlog
+  rather than a failing build until `find_unseated` landed and went red on the
+  first run. that is the same shape as `check`'s sketch assertion passing on an
+  empty set and `--dist` exiting 0 while writing elsewhere: **a limitation
+  nothing asserts is indistinguishable from one nobody knows about.**
+
+  PartDesign does not solve this one - an `App::Link` has no per-instance
+  geometry either - so it needs its own answer: instances that differ in drilling
+  are different parts, and the bom has to group them.
+
 ## later
 
 - **FEM assembly contact.** the assembly FEM target currently fuses the structural
@@ -19,6 +77,230 @@
   than just keeping the silhouette.
 
 ## done
+
+- **a part is described once: `profile2d`, `holes` and `fastener_holes` are
+  gone.** geometry is `build` (a `PartDesign::Body`) or `solid`, and nothing
+  else. three things followed, and the third was a surprise.
+
+  **the blank is derived from the tree.** suppress every feature whose removal
+  gives material back, recompute, and that is the part before its joinery.
+  FreeCAD will not say which those are - `AddSubType` is not exposed to python,
+  and Pad, Pocket, Hole and Fillet all derive from `PartDesign::FeatureAddSub` -
+  so fcad asks the geometry, which needs no vocabulary and is right about a
+  Pocket, a Groove and a dressup Fillet without knowing what any of them are.
+  the old outline-and-thickness blank could only express a hole, which is
+  exactly why a groove or a lap used to read as material the part had lost.
+
+  **the drawing reads its circles off the sketches.** `dimension_sketches` names
+  which sketches have circles worth dimensioning; fcad reads them back out of
+  the built tree, so a dimension cannot disagree with the bore it came from.
+  `fastener_holes` disappeared as a concept - it only ever meant "on the sketch
+  but not on the drawing", and "on the sketch" is now what being a feature is.
+
+  **one check is deleted rather than passing, and one was deleted wrongly.**
+  `find_sketch_drift` is gone: a sketch that *is* what was padded cannot drift
+  from it. `find_undrilled` was deleted on the same reasoning and had to come
+  back, because the reasoning only covers half the contract - a part that hands
+  over its own `solid` still names its circles apart from cutting them, which is
+  the gap R3.1.2 is about and is exactly the planter's shape. it is scoped to
+  `dimension_circles` now. **REQUIREMENTS is the file that caught this**, not a
+  test, and only because a downstream report sent me back to it; R3.1.2 now
+  states the rule I failed to apply - an assertion may be retired only when the
+  failure becomes *unrepresentable*, not merely unlikely.
+
+  **and one output silently emptied.** dropping the defining sketch for
+  solid-supplying parts took `dist/sketches` from 20 files to 0 on the planter,
+  with "every defining sketch is fully constrained" still passing *vacuously* -
+  the `--dist` failure shape again, and worse than it looked because those files
+  are tracked in git. the outline was never the ambiguous half; the circles were.
+  so the sketch is drawn again from the part's outline plus its
+  `dimension_circles`, which is a *checked* description (`find_undrilled` asserts
+  each is bored, and the drawings dimension the same list) rather than the
+  unvalidated `holes` the old sketch carried. the planter's corpus pins the
+  distinction: `floor_slat_end` had 15 circles before (10 drainage + 5 fastener,
+  odd because notches clip its screw span) and comes back with 10.
+
+  **the surprise: `holes` carried two meanings and only one was replaced.** it
+  said "dimension these" *and* "this cut is meant to stay empty". the second was
+  load-bearing for the void check and nothing in the geometry replaces it - a
+  nut's bore and a lap relieved twice as wide as its crossing member are both a
+  subtractive feature. the hexnut failed `check` at the same 9425 mm^3 that
+  opened this whole thread, which is how it was found. `openings` is that fact,
+  and it is the one declaration that survived, because it is intent rather than
+  a second description of geometry.
+
+  the cost is real and lands on `length`: without `profile2d` there is no
+  outline to measure, so the bom falls back to building the shape for a bounding
+  box. every swept model should state `length=`; fastenplates does, and its
+  sweep still runs in 0.2s. `VISIBLE_TYPES` also needed `PartDesign::Body` -
+  without it a declared part's file was saved to open on an empty 3d view, which
+  `tests/test_contract.py` caught.
+
+- **`--dist` reached the cli and stopped there, and it destroyed files.**
+  `config.resolve()` read `--dist`/`FCAD_DIST` correctly and `cfg.env()` exported
+  it, but `Project.dist` derived `<root>/dist` from scratch and never looked. so
+  `fcad -d /tmp/scratch build` reported the right directory from `info`, left it
+  empty, and wrote over the project's own `dist/` - exit 0, no warning, nothing
+  to notice until you looked. the planter project ran exactly that expecting an
+  out-of-tree build and had **24 tracked files clobbered**; recoverable only
+  because they happened to be staged.
+
+  `Project.dist` now follows the same precedence as `config.resolve` (explicit,
+  then `FCAD_DIST`, then `<root>/dist`) and the loader passes the resolved value
+  in. both halves are needed: an explicit `PROJECT = fcad.Project(...)` never
+  goes through the loader, so the property has to read the environment too.
+  `tests/test_dist.py` pins it in both directions - the artifacts land where they
+  were asked for, *and* a sentinel in the default location survives untouched,
+  which is the half that would have saved planter.
+
+- **a TypeId is checked, and a joint is named.** two places fcad wrote a value
+  where FreeCAD had a name. `fcad.types` resolves `types.PartDesign.Pad` to the
+  plain string `"PartDesign::Pad"` against the running FreeCAD's *own* registry,
+  so a typo raises where it was written rather than inside a recompute three
+  steps later, and nothing goes stale: `types.PartDesign.Groove` resolves though
+  the word Groove appears nowhere in fcad, and `dir(types.PartDesign)` lists the
+  71 this build ships. it is not a wrapper - the value is the string the FreeCAD
+  wiki writes, so cross-referencing still works, and bare literals keep working.
+
+  this is FreeCAD's own interface rather than fcad proxying it: `doc.addObject`
+  takes a TypeId, and of the workbenches fcad drives (PartDesign, Sketcher,
+  Assembly) *none* ships a factory function - only ObjectsFem, Draft and Arch do.
+  so the fix was never to invent classes, it was to check the string. one wrinkle
+  forced the mechanism and is worth recording: `supportedTypes()` reports only
+  types whose module is *loaded* - a fresh document knows 38 and no PartDesign at
+  all - so a namespace is imported before its types are looked for.
+
+  and `JOINT_FIXED = 0` is gone. it was an *index* into `JointObject.JointTypes`,
+  correct today by luck and silently wrong the day anything is inserted ahead of
+  it. it is `"Fixed"` now, looked up by name, and an unknown joint type says so
+  and lists the thirteen this FreeCAD has.
+
+- **a project can joint its own assembly (`ASSEMBLE`).** fcad grounds the
+  `grounded` parts and mates the rest to the datum with a Fixed joint, which is
+  the honest default for a model whose positions python already computed - the
+  solver has nothing to resolve, and a joint naming a face would drag in the
+  topological naming problem fcad dodges everywhere else. but Fixed was one of
+  thirteen joint types and the only one reachable, so a hinge could not be
+  modelled at all.
+
+  a project declaring `assemble(doc, asm, links)` is handed the real
+  `Assembly::AssemblyObject` once the links exist and the anchors are grounded,
+  and owns the jointing from there - fcad adds no Fixed joints of its own, so
+  there is no over-constraint puzzle, and `fix_to_datum` is exported for the
+  instances it does not care about. `check`'s grounded-or-jointed assertion still
+  applies and a custom joint satisfies it. `tests/test_assemble_hook.py` pins the
+  default, a `Revolute` from a hook, and the assertion holding either way.
+
+- **the README ships inside the fcad skill.** the two had become two accounts of
+  one contract, drifting apart every time either was edited, and the skill is
+  what an agent actually loads. `install-skill` now writes `README.md` beside
+  `SKILL.md`, and SKILL.md points at it for the long form instead of restating
+  it. there is still exactly one README: a wheel force-includes the repo-root
+  file into the skill directory, and an editable install reads the real one two
+  levels above the package. (the earlier note about force-include breaking the
+  wheel applied to re-including `resources/`, which hatchling already ships;
+  bringing in a file from outside the package dir is what it is for.)
+
+- **the well-lit path: a part is declared, and FreeCAD builds it.** a part that
+  declares geometry and no `solid` is built as a `PartDesign::Body` and its shape
+  read back from the recompute. `dist/parts/<name>.FCStd` is that body -
+  fully-constrained sketches throughout. the geometry is identical to what the
+  hand-built shape produced (the hexnut matches to 0.0000 mm^3), so converting a
+  project changes nothing but the amount of code in it.
+
+  **fcad holds no feature vocabulary, and no model of one.** a part that needs
+  more than the `profile2d` + `holes` shorthand passes `build(doc, body)` and
+  writes real FreeCAD calls against a live document and an empty body. this went
+  through two worse designs first, both worth recording. the first hardcoded a
+  pad-and-bore builder *and* a separate BREP derivation of the same geometry -
+  two implementations that could disagree, in the change meant to stop a part
+  having two descriptions. the second replaced that with `fcad.Sketch` and
+  `fcad.Feature` (a TypeId, a profile and a property dict), which covered every
+  feature whose inputs are a sketch and scalars - and nothing else. anything fcad
+  models is a smaller, lossier copy of FreeCAD's own: no arcs, no attachment, no
+  fillet, because a fillet references an *edge* of an earlier feature and no
+  fcad-side description can name one. handing over the document costs fcad
+  nothing and reaches all of it.
+
+  the shape comes from the recompute rather than a faster second derivation, and
+  the numbers say that is affordable: 17 ms a part against 3 ms, which `check`
+  pays once per part (0.7s -> 3.9s on a 224-instance model) and the bom, cut list
+  and `optimize` do not pay at all - a declared part measures its length from its
+  own outline, so a sweep of hundreds of candidates now builds *no* geometry
+  where it used to build a solid per candidate just to read a bounding box.
+
+  the reason to prefer it is not tidiness. everywhere else a part's sketch, its
+  solid and its drawing are three artifacts that agree only because `check`
+  asserts they do - which is precisely why `find_undrilled` and
+  `find_sketch_drift` exist. a declared part has one description and cannot
+  drift. it is also the only representation a person can open and edit: a
+  `Part::Feature` is a shape in a bag, a body has a feature tree. and
+  `PartDesign::Hole` carries what a `Part.Shape` throws away - `DepthType`,
+  `HoleCutType` (counterbore/countersink/counterdrill), `ThreadType` (ISO metric,
+  UNC, NPT, BSP), `Threaded`, `DrillPoint` - which is the intent that made fcad
+  need to be *told* about holes in a list beside the geometry in the first place.
+
+  every example is a body now. the hexnut is the whole argument for the
+  shorthand: it imports `Placement`, nothing else, and contains no geometry code.
+  fastenplates is the argument for `build` - its screw is turned, which no
+  outline describes, so it writes a `PartDesign::Revolution` itself in eight
+  lines and comes out as real and as editable as the plate (1040.5 mm^3, exactly
+  what the old `makeCylinder`+`fuse` gave). `tests/test_partdesign.py` pins the
+  built solid against the hand-built one, the feature tree, a `Pocket`, and a
+  `Fillet` on an edge picked by predicate - the last of which is the case no
+  fcad-side feature model could have expressed.
+
+  three things the FreeCAD api does not tell you, each found by hitting it, and
+  each of which fails *quietly*: a feature's properties can only be set once it
+  has a base; the previous feature must be recomputed before the next is added;
+  and a cut whose profile lies on the far face needs `Reversed` set correctly or
+  it runs away from the material - it succeeds, reports `Up-to-date`, and removes
+  nothing at all.
+
+- **a hole a project declares is documented intent, not missing material.** the
+  void check and the sketch-drift note both measured a part against its bare
+  `profile2d` blank, so every declared bore read as material gone astray. the
+  shipped hexnut - a plate whose entire point is the hole through it - failed
+  `check` at 9425 mm^3 "unfilled", 6.4% of its blank against a 1% budget, and was
+  noted for losing 6% of an outline that in fact draws the bore as a circle. both
+  now measure against the blank *with the declared holes bored*, which is what
+  the defining sketch actually depicts. the distinction is the whole point of the
+  check and is preserved: the same cavity left undeclared is still caught, which
+  `tests/test_checks.py` pins in both directions.
+
+- **`fcad.testing` works for the projects the docs describe.** the helper module
+  shipped with no test of its own and had been written against one project's
+  shape: `specs()` indexed `data["specs"]`, so it raised `TypeError` on a
+  `compute` returning the bare list - the form the contract calls the common case
+  and all three examples use - and `solids()`/`blanks()` called `mod.from_spec`,
+  which a project built from `fcad.PartSpec` does not define. both now normalize the
+  way the loader does. and `fcad test` routes each test through the same `_entry`
+  bootstrap the build path uses, because FreeCAD's embedded interpreter ignores
+  PYTHONPATH: `from fcad import testing` - the import the docs open with - could
+  not resolve, which is why both projects hand-rolled a `sys.path` preamble to
+  find the fcad checkout. `tests/test_testing.py` runs the whole path end to end.
+
+- **the examples exercise the contract again.** two of the three failed `check`
+  under the assertions added since they were written: the hexnut for the void
+  above, and fastenplates because its screw threaded into a pilot bored *under*
+  the shank, so it ploughed 144 mm^3 into the plate - which `embeds` hid from the
+  interference test and the seating check correctly caught. the plates are bored
+  to the shank now, as planter does it. beyond that the examples had drifted out
+  of date rather than wrong: none declared `STOCK`, so every one of them reported
+  `total: 0 board(s)`; none declared `CONSTRAINTS`; none shipped tests. fastenplates
+  now carries all three, and its sweep is a real one - `fcad optimize plate_len
+  overlap` finds a 200 mm bar in place of a 300 mm one and rejects 11 candidates
+  that would have bought the saving by shrinking the joint below its stated reach.
+
+- **projects import what they use.** the examples opened with
+  `import fcad, Part, FreeCAD as App`, which leaves a reader to work out that
+  `Part` and `FreeCAD` are FreeCAD's own modules, importable because a `.fcad`
+  runs inside FreeCAD rather than because fcad injected them (it does not - a
+  project is loaded as ordinary python). they now `import Part` and
+  `from FreeCAD import Placement, Rotation, Vector`, so provenance is on the
+  import line and there is no alias to decode. it also stops two unrelated things
+  sharing a word without comment: FreeCAD's `Part` is the geometry kernel,
+  `fcad.PartSpec` is the part spec.
 
 - **the checks that look for what is *not* there.** everything `check` asserted
   before this was positive space - solids that overlap, components that float,
@@ -551,7 +833,7 @@
   `profile`/`NAME`) when no explicit `PROJECT = fcad.Project(...)` is present (that
   form, and the directory/`project.py` form, stay fully supported; R1.1 is
   additive). chosen approach was **python + inference**, no second config format.
-  delivered: `fcad.Part`, the ready-made spec (a `solid` thunk + optional
+  delivered: `fcad.PartSpec`, the ready-made spec (a `solid` thunk + optional
   `profile2d`, with `qty`/`length` derived); `Project` became a thin adapter that
   normalizes `compute` (bare list or dict), falls back `from_spec`/`profile` to the
   spec's own `solid()`/`profile2d`, and infers the varset schema (property type

@@ -24,6 +24,8 @@ import os
 import sys
 from importlib.machinery import SourceFileLoader
 
+from fcad.project import normalize
+
 # a face-to-face contact leaves an OCC sliver rather than exactly zero, so a
 # shared volume under this is two parts touching, not interfering.
 TOUCH_VOL = 1.0
@@ -57,20 +59,38 @@ def find(path=None, stem=None):
 
 
 def specs(mod, values=None):
-    """{name: spec} for the project's computed parts."""
-    data = mod.compute(dict(values or mod.PARAMS))
-    return {s.name: s for s in data["specs"]}
+    """{name: spec} for the project's computed parts.
+
+    a project's `compute` may hand back the bare list or the dict form, so this
+    normalizes exactly as the loader does rather than making a test know which
+    one its own project wrote."""
+    return {s.name: s
+            for s in normalize(mod.compute(dict(values or mod.PARAMS)))["specs"]}
+
+
+def shape(mod, spec):
+    """a spec's unplaced solid, however the project chose to declare it.
+
+    the project's own `from_spec` if it has one (a project realizing its own
+    duck-typed spec), else the spec's `solid()` thunk -- the same fallback
+    `fcad.Project` makes, so a minimal project built out of `fcad.PartSpec` needs no
+    `from_spec` here either."""
+    build = getattr(mod, "from_spec", None)
+    return build(spec) if build else spec.solid()
+
+
+def _placed(base, spec):
+    out = []
+    for pl in spec.placements:
+        copy = base.copy()
+        copy.Placement = pl
+        out.append(copy)
+    return out
 
 
 def solids(mod, spec):
     """every placed solid for a spec. the shape is built once and reused."""
-    shape = mod.from_spec(spec)
-    out = []
-    for pl in spec.placements:
-        copy = shape.copy()
-        copy.Placement = pl
-        out.append(copy)
-    return out
+    return _placed(shape(mod, spec), spec)
 
 
 def blanks(mod, spec):
@@ -80,13 +100,7 @@ def blanks(mod, spec):
     counterbore inflates it by a millimetre or two, so anything measuring where
     a face actually *sits* wants the blank."""
     build = getattr(mod, "blank", None)
-    shape = build(spec) if build else mod.from_spec(spec)
-    out = []
-    for pl in spec.placements:
-        copy = shape.copy()
-        copy.Placement = pl
-        out.append(copy)
-    return out
+    return _placed(build(spec) if build else shape(mod, spec), spec)
 
 
 def extent(mod, spec, index=None):

@@ -135,7 +135,8 @@ for the script name.
 
 - **solids (true BREP):** `Part.makeBox(l,w,h)`, `Part.makeCylinder(r,h,pos,axis)`,
   `shape.cut/fuse/common(other)`. place with
-  `App.Placement(App.Vector(...), App.Rotation(axis, deg))`.
+  `Placement(Vector(...), Rotation(axis, deg))` (`from FreeCAD import Placement,
+  Rotation, Vector`; the wiki's `FreeCAD as App` alias is a habit, not a rule).
 - **STEP:** `Part.export([feature_objs], path)` works per part and for a
   compound; produces real solids (planar faces, not a mesh).
 - **STL:** `Mesh.export([objs], path)`.
@@ -195,7 +196,7 @@ for the script name.
 - **cross-document `App::Link`:** save the owner doc (`saveAs`) **before**
   adding links into other (saved) docs, or you get "Owner document not saved".
 - **centered solids:** bake centering into geometry with
-  `Part.makeBox(l,w,t, App.Vector(-l/2,-w/2,-t/2))`. do NOT use
+  `Part.makeBox(l,w,t, Vector(-l/2,-w/2,-t/2))`. do NOT use
   `shape.translate()` to center: translate sets the shape's Placement, which a
   later `shape.Placement = ...` assignment clobbers (parts end up offset by
   half their size and rotate about the wrong point).

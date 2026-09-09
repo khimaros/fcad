@@ -18,10 +18,15 @@ never regress on them.
   fcad reads everything through one `Project` and carries zero model knowledge.
   the explicit form is never removed.
 - R1.1a a part `compute` returns is duck-typed: fcad reads `name`, `placements`,
-  `profile` (a bom label), `holes`, `grounded`, `embeds`, and realizes it via a
-  `solid()` method (+ optional `profile2d`) or the project's `from_spec`/`profile`.
-  `fcad.Part` is the ready-made part; a project may use its own type exposing the
-  same surface. an assembly with no part flagged `grounded` anchors its first part.
+  `profile` (a bom label), `length`, `grounded`, `embeds`, the drawing and intent
+  declarations (`dimension_sketches`/`dimension_circles`, `openings`), and
+  realizes it via `build(doc, body)` (a PartDesign body, the well-lit path), a
+  `solid()` method, or the project's `from_spec`. a part's *outline* - the stock
+  it is cut from - comes from the project's `profile`/`profile2d` and is what
+  `dist/sketches` draws and the void assertion measures against for a part fcad
+  cannot derive a blank for. `fcad.PartSpec` is the ready-made part (`fcad.Part`
+  remains an alias); a project may use its own type exposing the same surface. an
+  assembly with no part flagged `grounded` anchors its first part.
 - R1.2 the project location is resolved from (in order) the `--project` flag, the
   `FCAD_PROJECT` env var, then the current directory; it may name a directory or a
   `.fcad` file, and a directory holding a sole `.fcad` (and no `project.py`) is
@@ -96,10 +101,19 @@ never regress on them.
   assertion and renders perfectly.
 - R3.1.2 `check` must also assert the things an interference test is
   structurally unable to see, because they are *absences*: a part with nothing
-  holding it up, a cut larger than the joint it relieves, a hole a part
+  holding it up, a cut larger than the joint it relieves, a circle a part
   dimensions but never bores, a part severed by its own joinery. each renders
   and exports exactly like a correct one. a check that only looks for overlap
-  cannot see a joint that is wrong in the other direction.
+  cannot see a joint that is wrong in the other direction. an assertion may be
+  retired only when the failure it names becomes *unrepresentable*, not merely
+  unlikely: the dimensioned-but-unbored circle is impossible for a part built
+  from a feature tree (the dimensions are read back out of the bores) and is
+  still asserted for a part that supplies its own `solid`, where the circle is
+  still named apart from being cut.
+- R3.1.4 a cut that is *meant* to stay empty is not a defect. no geometry
+  distinguishes a nut's bore from a lap relieved twice as wide as its crossing
+  member, so a project declares which is which (`openings`) and the void
+  assertion of R3.1.2 measures against a baseline that keeps them.
 - R3.1.3 a project may declare `CONSTRAINTS`: predicates over its own computed
   values saying when the model still means what it says. `check` asserts them
   and reports the ones that broke, by whatever name the predicate gives itself.

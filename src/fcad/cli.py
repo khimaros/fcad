@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from fcad import __version__, config, cutlist
-from fcad._run import run_entry
+from fcad._run import entry_path, run_entry
 # the animation vocabulary only; fcad.render is import-free at package level, so
 # naming these in --help costs nothing (importing the renderers pulls matplotlib).
 from fcad.render import CAMERAS, FEM_SECONDS, MESH_SUBJECTS, ORDERS, SUBJECTS
@@ -36,6 +36,11 @@ OPTIMIZE_LIMIT = 10
 SKILLS = ("fcad", "freecad-python")
 API_SKILL = "freecad-python"
 SKILL_NAME = API_SKILL          # kept: tests and callers name the api skill
+SKILL_NAME_FCAD = "fcad"
+# the user documentation ships inside the fcad skill, so SKILL.md can reference
+# it rather than restating the contract in a second voice.
+README_NAME = "README.md"
+PKG_ROOT = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.expanduser("~/.claude/skills")
 # records which freecad the installed `api/` describes. the reference is only
 # valid for the build that produced it, and `freecadcmd --version` is a 50ms
@@ -294,6 +299,22 @@ def _install_skill(cfg, skill_dir=None, force=False):
     return rc
 
 
+def _project_readme(skill):
+    """the user documentation, wherever this install put it.
+
+    it ships *into* the fcad skill so SKILL.md can point at it instead of
+    restating it - the two were drifting into two accounts of one contract. a
+    wheel carries it inside the skill directory (pyproject force-includes it);
+    an editable install has the real repo two levels above the package, so look
+    there too rather than shipping a copy that can go stale."""
+    for path in (os.path.join(skill, README_NAME),
+                 os.path.join(PKG_ROOT, os.pardir, os.pardir, README_NAME)):
+        text = _read(path)
+        if text:
+            return text
+    return ""
+
+
 def _install_one(cfg, root, base, name, force):
     """install one shipped skill, generating its api reference if it has one.
 
@@ -302,10 +323,13 @@ def _install_one(cfg, root, base, name, force):
     current whenever the shipped prose matches what is installed."""
     skill, out = os.path.join(root, name), os.path.join(base, name)
     wanted = _read(os.path.join(skill, "SKILL.md"))
+    readme = _project_readme(skill) if name == SKILL_NAME_FCAD else ""
     api = os.path.join(out, "api")
     build = _freecad_build(cfg) if name == API_SKILL else ""
 
     current = _read(os.path.join(out, "SKILL.md")) == wanted
+    if readme:
+        current = current and _read(os.path.join(out, README_NAME)) == readme
     if name == API_SKILL:
         current = current and build and (
             _read(os.path.join(api, SKILL_STAMP)) or "").strip() == build
@@ -316,8 +340,12 @@ def _install_one(cfg, root, base, name, force):
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "SKILL.md"), "w") as f:
         f.write(wanted)
+    if readme:
+        with open(os.path.join(out, README_NAME), "w") as f:
+            f.write(readme)
     if name != API_SKILL:
-        print("installed skill: %s" % out)
+        print("installed skill: %s%s" % (out, "" if readme else
+                                         " (WARNING: no README.md found to ship)"))
         return 0
 
     os.makedirs(api, exist_ok=True)
@@ -347,7 +375,12 @@ def _test(cfg, paths):
     exception -- and neither can stdout, which it discards when a script exits
     non-zero and which is block-buffered off a terminal anyway. so every test
     writes `RESULT PASS` to `$RESULT_FILE` (see `fcad.testing`) and this reads
-    that. a test that produces no verdict at all failed."""
+    that. a test that produces no verdict at all failed.
+
+    each runs through the same `_entry` bootstrap the build path uses rather than
+    straight under freecadcmd, because FreeCAD's embedded interpreter ignores
+    PYTHONPATH: without it `from fcad import testing` cannot resolve and every
+    project has to hand-roll a preamble to find the fcad checkout."""
     import glob
     import subprocess
     import tempfile
@@ -372,7 +405,7 @@ def _test(cfg, paths):
             if os.path.exists(result):
                 os.remove(result)
             env = {**os.environ, **cfg.env(), "RESULT_FILE": result}
-            subprocess.run([cfg.freecad, path], env=env,
+            subprocess.run([cfg.freecad, entry_path(), "test", path], env=env,
                            capture_output=True, text=True)
             verdict = ""
             if os.path.exists(result):

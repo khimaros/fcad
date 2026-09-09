@@ -18,7 +18,12 @@ from fcad.freecad import util as fcutil
 
 # the built-in Assembly workbench ships its python modules here.
 ASSEMBLY_MOD = "/usr/share/freecad/Mod/Assembly"
-JOINT_FIXED = 0  # index into JointObject.JointTypes
+# the joint fcad mates instances with. `JointObject.Joint` takes a *position* in
+# `JointObject.JointTypes` (an ordered list: Fixed, Revolute, Cylindrical,
+# Slider, Ball, Distance, ...), so this is looked up by name rather than written
+# as an index - a hardcoded 0 keeps working right up until something is inserted
+# ahead of it, and then silently builds the wrong kind of joint.
+JOINT_FIXED = "Fixed"
 
 # how far an `embeds` part is shifted to ask what is holding it, and how many of
 # the six directions have to answer. a through bore captures four, a blind hole
@@ -41,6 +46,9 @@ SKETCH_DRIFT = 0.05
 # tolerance for "is this point still solid": a bored hole leaves its centre in
 # free space by at least its own radius, so this only has to beat rounding.
 HOLE_TOL = 0.01
+# how far a declared bore is run past both faces of the blank it is cut from, so
+# the cut is a clean through hole rather than one landing on a coincident face.
+BORE_OVERSHOOT = 1.0
 
 V = App.Vector
 # the assembly drawing sheet uses the same projection-aligned grid as the parts:
@@ -53,6 +61,40 @@ ASM_VIEWS = [
     ("front", V(0, -1, 0), V(1, 0, 0),  0, 1),
     ("right", V(1, 0, 0),  V(0, 1, 0),  1, 1),
 ]
+
+
+def joint_type(module, name):
+    """the index `JointObject.Joint` wants for a joint named `name`.
+
+    the constructor takes a position in `JointObject.JointTypes` rather than the
+    name, so this is the translation - done once, by name, against whatever this
+    FreeCAD ships. a build that asks for a joint this version does not have says
+    so instead of making the one that happens to sit at that index."""
+    types = list(module.JointTypes)
+    if name not in types:
+        raise SystemExit("fcad: this FreeCAD has no %r joint type (it has: %s)"
+                         % (name, ", ".join(types)))
+    return types.index(name)
+
+
+def whole_of(asm, obj):
+    """the reference a joint takes for a whole part rather than one of its faces.
+
+    naming a face here would be the topological naming problem in the one place
+    fcad can avoid it: the placements are already computed, so a joint has
+    nothing to solve and needs no geometry to mate to."""
+    return [asm, [obj.Name + ".", obj.Name + "."]]
+
+
+def fix_to_datum(module, asm, joints, datum, links):
+    """fix every link rigidly to the datum: fcad's default, and a project's to
+    reuse for the instances it does not want to joint itself."""
+    fixed = joint_type(module, JOINT_FIXED)
+    for link in links:
+        j = joints.newObject("App::FeaturePython", "Fix_" + link.Name)
+        module.Joint(j, fixed)
+        j.Reference1 = whole_of(asm, datum)
+        j.Reference2 = whole_of(asm, link)
 
 
 def placed_shapes(project, specs):
@@ -71,14 +113,24 @@ def placed_shapes(project, specs):
 
 
 def blank_shape(project, spec):
-    """a part's solid without its drilled features, from its defining profile.
+    """a part's solid before its joinery: every subtractive feature suppressed.
 
     a global model wants the load path, not the fastener holes, and the holes are
     what make one unsolvable: gmsh sizes elements from curvature, so a 4 mm pilot
     pulls the local element size to about a millimetre however coarse the ceiling
     is. a whole fastened assembly then spends every node resolving fastener holes
-    and never finishes meshing. a spec with no 2d profile falls back to its real
-    solid."""
+    and never finishes meshing.
+
+    this used to be the `profile2d` outline extruded, which could only express a
+    part whose joinery was holes: a groove down one face or a lap taking half the
+    thickness came back as material the blank had and the part did not, which is
+    what `find_sketch_drift` used to complain about. the tree knows which cuts
+    are cuts, so the blank is now right about all of them. a part with no tree
+    (one that hands over a `solid`) has no joinery fcad can identify and falls
+    back to its real solid."""
+    if getattr(spec, "declared", False):
+        from fcad.freecad.partdesign import blank_of
+        return blank_of(spec)
     prof = project.profile(spec)
     if prof is None:
         return project.from_spec(spec)
@@ -86,6 +138,29 @@ def blank_shape(project, spec):
     poly = [App.Vector(x, y, -thickness / 2.0) for x, y in pts]
     return Part.Face(Part.makePolygon(poly + [poly[0]])).extrude(
         App.Vector(0, 0, thickness))
+
+
+def void_baseline(project, spec):
+    """the shape the void check measures against: the blank, openings kept.
+
+    what it wants to know is how much *joinery* a part gave up, so cuts the
+    project called openings stay cut. a part with a tree names the sketches; one
+    supplying its own solid lists circles, which are bored from its stock
+    outline the way they always were."""
+    openings = list(getattr(spec, "openings", ()) or ())
+    if getattr(spec, "declared", False):
+        from fcad.freecad.partdesign import blank_of
+        return blank_of(spec, keep=set(openings))
+    blank = blank_shape(project, spec)
+    prof = project.profile(spec)
+    if prof is None:
+        return blank
+    thickness = prof[1]
+    for cx, cy, dia in openings:
+        blank = blank.cut(Part.makeCylinder(
+            dia / 2.0, thickness + 2 * BORE_OVERSHOOT,
+            V(cx, cy, -thickness / 2.0 - BORE_OVERSHOOT)))
+    return blank
 
 
 def target_shape(project, values, target, undrilled=False):
@@ -131,7 +206,7 @@ class Model:
         self.project = project
         self.specs = project.compute(values)["specs"]
         self.structural, self.embedded = [], []
-        self._blank = {}
+        self._shapes = {}             # (builder, part) -> unplaced shape
         for spec in self.specs:
             base = project.from_spec(spec)
             into = self.embedded if getattr(spec, "embeds", False) \
@@ -141,13 +216,22 @@ class Model:
                 s.Placement = pl
                 into.append(("%s_%03d" % (spec.name, i + 1), spec, s))
 
-    def blank(self, spec, placement):
-        """the part before its drilled features, placed. cached per part."""
-        if spec.name not in self._blank:
-            self._blank[spec.name] = blank_shape(self.project, spec)
-        s = self._blank[spec.name].copy()
+    def _placed(self, build, spec, placement):
+        key = (build.__name__, spec.name)
+        if key not in self._shapes:
+            self._shapes[key] = build(self.project, spec)
+        s = self._shapes[key].copy()
         s.Placement = placement
         return s
+
+    def blank(self, spec, placement):
+        """the part before its joinery, placed. cached per part, which matters
+        here: deriving it suppresses and recomputes once per feature."""
+        return self._placed(blank_shape, spec, placement)
+
+    def baseline(self, spec, placement):
+        """the blank with its openings still cut, placed. cached per part."""
+        return self._placed(void_baseline, spec, placement)
 
     def hit(self, shape, skip=None, tol=1.0):
         """(name, volume) of the worst structural solid `shape` runs into."""
@@ -258,17 +342,19 @@ def find_voids(project, values, budget=VOID_BUDGET, model=None):
     pocket inside the assembly. it passes every other check -- a void is the
     opposite of an overlap -- and shows up in a render only as a shadow.
 
-    a part is compared against its own `profile2d` blank, so only projects that
-    declare one are examined; the tolerance is a fraction of that blank, because
-    real clearances (a groove ploughed wide, a blind mortise cut deep) scale
-    with the part while a mistake does not. returns (part, void_mm3, fraction)."""
+    a part is compared against its own blank - itself with every subtractive
+    feature suppressed - so the comparison is now right about a groove, a housing
+    or a lap, which the old outline-and-thickness blank could not even see. the
+    tolerance is a fraction of that blank, because real clearances (a groove
+    ploughed wide, a blind mortise cut deep) scale with the part while a mistake
+    does not. returns (part, void_mm3, fraction)."""
     model = model or Model(project, values)
     seen, bad = set(), []
     for name, spec, solid in model.structural:
         if spec.name in seen:
             continue
         seen.add(spec.name)
-        blank = model.blank(spec, solid.Placement)
+        blank = model.baseline(spec, solid.Placement)
         removed = blank.Volume - solid.Volume
         if removed <= 0:
             continue                      # nothing cut, or no distinct blank
@@ -329,56 +415,37 @@ def find_unsupported(project, values, drop=DROP, tol=1.0, model=None):
     return bad
 
 
+# `find_sketch_drift` used to live here. it compared a part against an outline
+# drawn beside it, and a part built from a feature tree has no outline beside
+# it - the sketch *is* what was padded - so the failure is not expressible.
+
+
 def find_undrilled(project, values, model=None):
-    """parts declaring `holes` that are not bored in the solid.
+    """circles a part dimensions on its drawing but never bores (R3.1.2).
 
-    `holes` is what fcad dimensions on the drawing and draws on the sketch;
-    cutting them is the project's job in `from_spec`. that split is easy to
-    half-implement, and the result is a part carrying its drainage on paper and
-    none in the wood -- which no other check can see, because a solid with one
-    fewer hole is a perfectly good solid.
+    a declared part cannot fail this: fcad reads the dimensions back out of the
+    bores themselves, so there is nothing to disagree with. a part that hands
+    over its own `solid` still names its circles apart from cutting them, and
+    that split is easy to half-implement - the result is a board carrying its
+    drainage on paper and none in the wood, which no other check can see because
+    a solid with one fewer hole is a perfectly good solid.
 
-    a hole's centre lies in the part's own XY plane at mid-thickness, so testing
-    whether that point is still inside the solid answers it exactly. returns
-    (part, n_undrilled, n_declared)."""
+    a circle's centre lies in the part's own XY plane at mid-thickness, so
+    testing whether that point is still inside the solid answers it exactly.
+    returns (part, n_undrilled, n_dimensioned)."""
     model = model or Model(project, values)
     seen, bad = set(), []
-    for _, spec, solid in model.structural + model.embedded:
-        holes = getattr(spec, "holes", ()) or ()
-        if spec.name in seen or not holes:
+    for _, spec, _solid in model.structural + model.embedded:
+        circles = getattr(spec, "dimension_circles", ()) or ()
+        if spec.name in seen or not circles:
             continue
         seen.add(spec.name)
-        # the solid is placed; test in its own frame instead.
-        base = project.from_spec(spec)
-        missing = sum(1 for cx, cy, _ in holes
+        base = project.from_spec(spec)      # the solid is placed; test its own frame
+        missing = sum(1 for cx, cy, _ in circles
                       if base.isInside(App.Vector(cx, cy, 0.0), HOLE_TOL, True))
         if missing:
-            bad.append((spec.name, missing, len(holes)))
+            bad.append((spec.name, missing, len(circles)))
     return bad
-
-
-def find_sketch_drift(project, values, budget=SKETCH_DRIFT, model=None):
-    """parts whose defining sketch is a poor description of the part.
-
-    the sketch is what lands in `dist/sketches` and on the drawing, so a part
-    built as a blank minus joinery on other planes -- a groove down one face, a
-    housing across another, a lap taking half the thickness -- is documented by
-    an outline it does not match. drilled features are expected to be missing
-    and are small; structural ones are not. advisory, not a failure: what counts
-    as "the defining outline" is the project's call. returns (part, fraction)."""
-    model = model or Model(project, values)
-    seen, out = set(), []
-    for _, spec, solid in model.structural:
-        if spec.name in seen or project.profile(spec) is None:
-            continue
-        seen.add(spec.name)
-        blank = model.blank(spec, solid.Placement)
-        if blank.Volume <= 0:
-            continue
-        frac = (blank.Volume - solid.Volume) / blank.Volume
-        if frac > budget:
-            out.append((spec.name, frac))
-    return out
 
 
 def find_unconstrained(path):
@@ -461,6 +528,11 @@ def build_jointed_doc(project, values, data, parts_dir, path):
     is mated to a datum (the first grounded part) with a Fixed joint, and the
     solver resolves the assembly. links are pre-positioned so the (fully
     constrained) solve is stable.
+
+    Fixed is the honest default for a model whose positions python already
+    computed - there is nothing left to solve - but it is one of thirteen joint
+    types, and a hinge is not a fixed joint. a project declaring `assemble` is
+    handed the real assembly and joints it itself.
     """
     sys.path.insert(0, ASSEMBLY_MOD)
     import JointObject
@@ -496,19 +568,24 @@ def build_jointed_doc(project, values, data, parts_dir, path):
         grounded.append(others.pop(0))
     doc.recompute()
 
-    def whole(obj):
-        return [asm, [obj.Name + ".", obj.Name + "."]]
-
     for link in grounded:
         gj = joints.newObject("App::FeaturePython", "Ground_" + link.Name)
         JointObject.GroundedJoint(gj, link)
     datum = grounded[0] if grounded else None
-    if datum is not None:
-        for link in others:
-            j = joints.newObject("App::FeaturePython", "Fix_" + link.Name)
-            JointObject.Joint(j, JOINT_FIXED)
-            j.Reference1 = whole(datum)
-            j.Reference2 = whole(link)
+
+    # jointing has exactly one owner. a project that declares `assemble` takes
+    # it: fcad has already made the links and grounded the anchors, and hands
+    # over the real `Assembly::AssemblyObject` to joint as it sees fit - a hinge
+    # is a `Revolute`, and fcad's default reaches one of the thirteen joint
+    # types this FreeCAD ships. without a hook, everything is fixed to the datum,
+    # which is what a model of computed placements means.
+    if project.assemble is not None:
+        by_name = {}
+        for link in grounded + others:
+            by_name.setdefault(link.Name.rsplit("_", 1)[0], []).append(link)
+        project.assemble(doc, asm, by_name)
+    elif datum is not None:
+        fix_to_datum(JointObject, asm, joints, datum, others)
     # the links are already realized (recompute above, before the joints exist)
     # and pre-positioned at the solution, so `solve()` alone fixes the assembly.
     # we deliberately do NOT recompute again: the fixed joints reference the

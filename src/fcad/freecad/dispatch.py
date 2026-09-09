@@ -127,6 +127,11 @@ def check(project, values=None):
     # overlap test above is structurally unable to see: a fastener that fits no
     # hole, a part with nothing under it, a cut larger than the joint it
     # relieves. each of those renders correctly and exports correctly.
+    #
+    # two others used to live here - a declared hole never bored, and a defining
+    # outline the solid did not match - and both are gone rather than passing.
+    # they were the cost of describing a part twice; a part built from a feature
+    # tree is described once, so neither failure can be expressed.
 
     # `embeds` is what excluded those parts from the overlap check, so it owes
     # the model a check of its own.
@@ -163,13 +168,13 @@ def check(project, values=None):
     undrilled = build_assembly.find_undrilled(project, values, model=model)
     if undrilled:
         failed = True
-        print("check failed: %d part(s) declare holes that are not bored:"
+        print("check failed: %d part(s) dimension circles that are not bored:"
               % len(undrilled))
         for name, missing, total in undrilled:
-            print("  %s: %d of %d holes are on the drawing but not in the solid"
+            print("  %s: %d of %d circles are on the drawing but not in the solid"
                   % (name, missing, total))
     else:
-        print("check ok: every declared hole is bored in the part")
+        print("check ok: every dimensioned circle is bored in the part")
 
     split = build_assembly.find_disjoint(project, values, model=model)
     if split:
@@ -180,14 +185,6 @@ def check(project, values=None):
             print("  %s: %d disconnected solids" % (name, n))
     else:
         print("check ok: every part is one connected solid")
-
-    # advisory: what counts as a part's defining outline is the project's call,
-    # so a sketch that omits joinery is worth saying out loud but is not a
-    # failure.
-    drift = build_assembly.find_sketch_drift(project, values, model=model)
-    for name, frac in drift:
-        print("check note: %s loses %.0f%% of its defining outline to joinery -"
-              " its sketch does not describe it" % (name, 100.0 * frac))
 
     asm = os.path.join(project.dist, project.name + ".FCStd")
     if not os.path.exists(asm):

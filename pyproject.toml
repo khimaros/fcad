@@ -24,3 +24,10 @@ fcad = "fcad.cli:main"
 # read back) needs no force-include - adding one made the wheel build fail
 # outright on a duplicate archive entry.
 packages = ["src/fcad"]
+
+# the README is the fcad skill's user documentation, so a wheel has to carry it
+# where `install-skill` looks. it lives at the repo root (github wants it there)
+# and is force-included rather than copied, so there is one of it. an editable
+# install finds the real file instead -- see cli._project_readme.
+[tool.hatch.build.targets.wheel.force-include]
+"README.md" = "fcad/resources/skills/fcad/README.md"

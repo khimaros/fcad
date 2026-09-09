@@ -9,7 +9,8 @@ code lives in `fcad.freecad` (imported only inside freecadcmd/freecad) and the
 matplotlib renderer in `fcad.render` (the `[render]` extra).
 """
 
-from fcad.project import Project, Part
+# `Part` is the name PartSpec shipped under, kept working for existing projects.
+from fcad.project import Part, PartSpec, Project
 
-__all__ = ["Project", "Part"]
+__all__ = ["Part", "PartSpec", "Project"]
 __version__ = "0.1.0"

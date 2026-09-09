@@ -29,6 +29,8 @@ src/fcad/
   _run.py         spawn the in-freecad entry: own session, inherited ceiling
   diff.py         worktree orchestration for `diff` (runs under the cli's python)
   fem_select.py   geometry-predicate face selectors for FEM (pure stdlib)
+  types.py        TypeId names checked against the installed FreeCAD's own
+                  registry (imports FreeCAD lazily, so the cli can import it)
   freecad/        everything that imports FreeCAD (runs under freecadcmd/freecad)
     _entry.py     in-freecad bootstrap: put the package on sys.path, route a command
     dispatch.py   build/validate targets -> part/assembly builders
@@ -36,6 +38,8 @@ src/fcad/
     view.py  view_parts.py  export_pdf.py  diff_doc.py
     api_docs.py   introspect the installed FreeCAD -> a markdown api reference
     fem.py        headless mesh (gmsh) + solve (CalculiX) -> numpy result bundle
+    run_test.py   run one project test here, so it inherits the bootstrap above
+    partdesign.py the body/document plumbing, plus optional sketch helpers
   render/         plain-python, numpy/matplotlib (the [render] extra)
     render.py  animate.py  fem_render.py  fem_animate.py
   resources/macros/rebuild.FCMacro
@@ -66,6 +70,13 @@ the project/name/dist/binaries once, exports them into the environment, then:
 - **render / animate / fem-render / fem-animate**: imported and called in-process
   under the cli's own python (these are the commands with pip dependencies and no
   FreeCAD need).
+- **test**: one `_entry.py test <file>` per project test, rather than handing the
+  file to freecadcmd directly. it looks like an indirection and is not: FreeCAD's
+  embedded interpreter ignores PYTHONPATH, so a test run directly cannot
+  `import fcad` at all, and every project had hand-rolled a `sys.path` preamble
+  pointing at the fcad checkout. routing through the bootstrap that already knows
+  where fcad lives deletes that. `run_test.py` then uses `runpy` so `__file__`,
+  `__name__` and `sys.argv` read the way a test script expects.
 - **diff**: `diff.py` builds the git-HEAD geometry in a throwaway `git worktree`
   (a nested `freecadcmd ... build step`), then execs the gui against `diff_doc.py`.
   the nested build must be repointed at the worktree's *own* copy of the design:

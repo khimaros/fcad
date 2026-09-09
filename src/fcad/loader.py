@@ -27,6 +27,7 @@ _GLOBALS = {
     "FROM_SPEC": "from_spec", "PROFILE": "profile", "ENUM_CHOICES": "enum_choices",
     "FEM": "fem", "PARAM_META": "param_meta", "MATERIAL": "material",
     "MATERIALS": "materials", "STOCK": "stock", "CONSTRAINTS": "constraints",
+    "ASSEMBLE": "assemble",
 }
 
 
@@ -44,7 +45,12 @@ def _from_globals(mod):
         raise AttributeError(
             "project module exposes neither PROJECT nor PARAMS+compute")
     cfg = config.from_env()
-    return Project(name=getattr(mod, "NAME", cfg.name), root=cfg.project, **kwargs)
+    # dist is passed, not recomputed: the cli already resolved --dist/FCAD_DIST
+    # and a `Project` deriving <root>/dist itself would build into the wrong
+    # directory. an explicit `PROJECT = fcad.Project(...)` never comes through
+    # here, which is why `Project.dist` reads the environment as well.
+    return Project(name=getattr(mod, "NAME", cfg.name), root=cfg.project,
+                   dist=cfg.dist, **kwargs)
 
 
 def _load_entry(path):

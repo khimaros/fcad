@@ -33,10 +33,12 @@ from fcad import config                                  # noqa: E402
 from fcad.freecad import build_parts, build_assembly, fem, util  # noqa: E402
 
 # a complete single-file project: two unflagged parts (so auto-ground must pick
-# one), one carrying a profile2d (so a defining sketch is built and must be fully
-# constrained), an enum param with declared choices, and a default fem material.
+# one), one declared (so a real body is built and its sketches must come out
+# fully constrained) and one handing over a solid, an enum param with declared
+# choices, and a default fem material.
 PROJECT_PY = '''
 import fcad
+from fcad.freecad import partdesign
 import Part, FreeCAD as App
 V = App.Vector
 
@@ -49,14 +51,19 @@ MATERIAL = "wood"
 def _rect(l, w):
     return [(-l/2, -w/2), (l/2, -w/2), (l/2, w/2), (-l/2, w/2)]
 
+def _plate(doc, body, l, w, t):
+    partdesign.pad_and_bore(doc, body, _rect(l, w), t, name="plate")
+
 def compute(p):
     l, w, t, s = p["plate_len"], p["plate_wid"], p["thk"], p["post"]
-    plate = fcad.Part("plate", placements=[App.Placement()], length=l,
-                      profile="plate", profile2d=(_rect(l, w), t),
-                      solid=lambda: Part.makeBox(l, w, t, V(-l/2, -w/2, -t/2)))
-    post = fcad.Part("post", placements=[App.Placement(V(200, 0, 0), App.Rotation())],
-                     profile="post",
-                     solid=lambda: Part.makeBox(s, s, 80, V(-s/2, -s/2, -40)))
+    plate = fcad.PartSpec("plate", placements=[App.Placement()], length=l,
+                          profile="plate",
+                          build=lambda doc, body: _plate(doc, body, l, w, t))
+    post = fcad.PartSpec("post", placements=[App.Placement(V(200, 0, 0), App.Rotation())],
+                         profile="post", profile2d=(_rect(s, s), 80.0),
+                         dimension_circles=[(0.0, 0.0, 6.0)], openings=[(0.0, 0.0, 6.0)],
+                         solid=lambda: Part.makeBox(s, s, 80, V(-s/2, -s/2, -40)).cut(
+                             Part.makeCylinder(3.0, 100.0, V(0, 0, -50))))
     return [plate, post]
 '''
 
@@ -106,7 +113,34 @@ def main():
         build_parts.build(project, vals, d, {"fcstd", "sketch"})
         build_assembly.build(project, vals, d, {"fcstd", "bom"})
 
-        # profile2d became a fully-constrained defining sketch
+        # both kinds of part export a defining sketch. the declared one's comes
+        # from its feature tree; the solid-supplying one's is its outline, drawn
+        # from the project's profile. dropping the second silently emptied
+        # dist/sketches for every project that hands over a solid, and left
+        # "every defining sketch is fully constrained" passing vacuously.
+        for part in ("plate", "post"):
+            for ext in ("svg", "dxf"):
+                p = os.path.join(d["sketches"], "%s.%s" % (part, ext))
+                ck("%s exports its defining sketch (%s)" % (part, ext),
+                   os.path.exists(p) and os.path.getsize(p) > 0)
+
+        # a solid-supplying part's sketch carries the circles it *dimensions*
+        # and no others: that list is asserted bored by `find_undrilled` and is
+        # the same one the drawing uses, so it is a checked description, unlike
+        # the unvalidated `holes` the old sketch drew.
+        def sketch_circles(part):
+            doc2 = App.openDocument(os.path.join(d["parts"], part + ".FCStd"))
+            try:
+                return [len([g for g in o.Geometry if isinstance(g, Part.Circle)])
+                        for o in doc2.Objects
+                        if o.TypeId == "Sketcher::SketchObject"]
+            finally:
+                App.closeDocument(doc2.Name)
+
+        ck("a dimensioned circle is drawn on the outline sketch (%s)"
+           % (sketch_circles("post"),), sketch_circles("post") == [1])
+
+        # the declared part's own sketches came out fully constrained
         loose = build_parts.find_loose_sketches(d["parts"])
         ck("defining sketch fully constrained (%s)" % (loose or "none"), not loose)
 
@@ -146,15 +180,27 @@ def main():
            not any(vis.get(n) for n in of("App::Plane")))
         fits(cam, bb, "assembly")
 
+        # a declared part is a body, and the body is what a viewer shows: its
+        # own features carry shapes too, and showing those as well would draw
+        # the part once per feature.
         vis, types, cam, bb = view_state(os.path.join(d["parts"], "plate.FCStd"))
         of = lambda t: [n for n, ty in types.items() if ty == t]
-        solids = of("Part::Feature")
+        bodies = of("PartDesign::Body")
         ck("part bakes gui view state", bool(vis))
-        ck("part solid opens visible (%d)" % len(solids),
-           bool(solids) and all(vis.get(n) for n in solids))
+        ck("part body opens visible (%d)" % len(bodies),
+           bool(bodies) and all(vis.get(n) for n in bodies))
+        ck("part features stay hidden behind the body",
+           not any(vis.get(n) for n in of("PartDesign::Pad")))
         ck("part defining sketch stays hidden",
            not any(vis.get(n) for n in of("Sketcher::SketchObject")))
         fits(cam, bb, "part")
+
+        # and a part that hands over a solid still opens as one.
+        vis, types, cam, bb = view_state(os.path.join(d["parts"], "post.FCStd"))
+        of = lambda t: [n for n, ty in types.items() if ty == t]
+        solids = of("Part::Feature")
+        ck("a solid-supplying part opens visible (%d)" % len(solids),
+           bool(solids) and all(vis.get(n) for n in solids))
 
         # bom: qty from placements, length from the explicit value / bbox
         with open(os.path.join(d["dist"], project.name + "-bom.csv")) as f:

@@ -10,7 +10,8 @@ import FreeCAD as App
 import Part
 import Sketcher
 
-from fcad.freecad import util as fcutil
+from fcad import types
+from fcad.freecad import partdesign, util as fcutil
 
 V = App.Vector
 # a four-cell third-angle sheet for a board lying flat: top (down +Z, length x
@@ -25,48 +26,54 @@ PART_VIEW = [
 ]
 
 
-def _defining_sketch(doc, name, pts, thickness, holes=()):
-    """a fully-constrained profile sketch (outline + in-plane hole circles).
+def is_declared(spec):
+    """whether a feature tree describes this part, so FreeCAD can build it.
 
-    the outline is closed with coincidences and every vertex pinned with
-    DistanceX/Y; each in-plane hole is a circle with its center pinned and a
-    diameter constraint. that leaves zero degrees of freedom, so the sketch is
-    fully constrained. it documents the part's profile and through-thickness
-    holes; the solid itself is built by project.from_spec (which also cuts the
-    holes on other faces that a single sketch cannot show)."""
-    sketch = doc.addObject("Sketcher::SketchObject", name + "_sketch")
-    sketch.Placement = App.Placement(V(0, 0, -thickness / 2.0), App.Rotation())
-    n = len(pts)
-    for i in range(n):
-        a = V(pts[i][0], pts[i][1], 0)
-        b = V(pts[(i + 1) % n][0], pts[(i + 1) % n][1], 0)
-        sketch.addGeometry(Part.LineSegment(a, b), False)
-    for i in range(n):
-        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % n, 1))
-    for i in range(n):
-        sketch.addConstraint(Sketcher.Constraint("DistanceX", i, 1, float(pts[i][0])))
-        sketch.addConstraint(Sketcher.Constraint("DistanceY", i, 1, float(pts[i][1])))
-    for cx, cy, dia in holes:
-        gi = sketch.addGeometry(Part.Circle(V(cx, cy, 0), V(0, 0, 1), dia / 2.0), False)
-        sketch.addConstraint(Sketcher.Constraint("DistanceX", gi, 3, float(cx)))
-        sketch.addConstraint(Sketcher.Constraint("DistanceY", gi, 3, float(cy)))
-        sketch.addConstraint(Sketcher.Constraint("Diameter", gi, float(dia)))
-    sketch.Visibility = False
-    return sketch
+    a project supplying its own `solid` keeps the plain `Part::Feature`, because
+    a body fcad invented would not be the shape the project meant."""
+    return bool(getattr(spec, "declared", False))
+
+
+def _outline_sketch(doc, spec, pts, thickness):
+    """the defining sketch for a part that hands over its own solid.
+
+    a declared part's sketches come from its feature tree; this is for the other
+    kind. it draws the outline - the stock the part is cut from - plus the
+    circles the part *dimensions*, and nothing else.
+
+    that circle list is the whole difference from the sketch fcad used to draw
+    here. the old one carried whatever the project put in `holes`, validated by
+    nothing, which is what made it a second and disagreeable description of the
+    part. `dimension_circles` is the same list the drawing dimensions and is
+    asserted actually bored by `find_undrilled`, so drawing it here is a checked
+    description rather than an unchecked one."""
+    return partdesign.add_sketch(
+        doc, doc, spec.name + "_sketch", points=pts,
+        circles=list(getattr(spec, "dimension_circles", ()) or ()),
+        z=-thickness / 2.0)
 
 
 def build_one(project, spec, values, dirs, formats):
     doc = App.newDocument(spec.name)
     fcutil.add_varset(doc, project, values)
-    prof = project.profile(spec)
-    sketch = None
-    if prof is not None:
-        # the sketch shows every in-plane circle (drainage + fastener); only the
-        # drainage holes are dimensioned on the drawing below.
-        all_holes = list(spec.holes) + list(getattr(spec, "fastener_holes", ()))
-        sketch = _defining_sketch(doc, spec.name, prof[0], prof[1], all_holes)
-    obj = doc.addObject("Part::Feature", spec.name)
-    obj.Shape = project.from_spec(spec)
+    if is_declared(spec):
+        # the part is its feature tree: the sketches in it are the definition,
+        # not a drawing of one, and the circles the drawing dimensions are read
+        # back out of them rather than declared a second time.
+        obj = partdesign.build_body(doc, spec)
+        sketches = partdesign.sketch_objects(doc)
+        holes = partdesign.circles_of(
+            doc, list(getattr(spec, "dimension_sketches", ()) or ()))
+    else:
+        # a part that hands over a solid has no tree to read, so it lists the
+        # circles it wants dimensioned itself, and its defining outline is drawn
+        # from the profile the project supplies.
+        prof = project.profile(spec)
+        sketches = ([_outline_sketch(doc, spec, prof[0], prof[1])]
+                    if prof is not None else [])
+        holes = list(getattr(spec, "dimension_circles", ()) or ())
+        obj = doc.addObject("Part::Feature", spec.name)
+        obj.Shape = project.from_spec(spec)
     obj.Visibility = True
     doc.recompute()
 
@@ -90,10 +97,11 @@ def build_one(project, spec, values, dirs, formats):
     if "drawing" in formats:
         fcutil.make_drawing(doc, [obj],
                             os.path.join(dirs["drawings"], spec.name + ".dxf"),
-                            PART_VIEW, holes=spec.holes,
+                            PART_VIEW, holes=holes,
                             title={"part": spec.name, "project": project.name})
-    if "sketch" in formats and sketch is not None:
-        fcutil.export_sketch(doc, sketch, os.path.join(dirs["sketches"], spec.name))
+    if "sketch" in formats and sketches:
+        fcutil.export_sketch(doc, sketches,
+                             os.path.join(dirs["sketches"], spec.name))
     App.closeDocument(doc.Name)
 
 

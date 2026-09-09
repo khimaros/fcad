@@ -13,7 +13,7 @@ import FreeCAD as App
 import Part
 
 from fcad.loader import load_project
-from fcad.freecad import util as fcutil, build_parts, build_assembly
+from fcad.freecad import util as fcutil, build_parts, build_assembly, partdesign
 
 
 def _pump(n=20):
@@ -86,7 +86,9 @@ def run(project):
         page = fcutil._page(doc, [obj], build_parts.PART_VIEW, tag="_pdf", dims=True,
                             title={"part": spec.name, "project": project.name})
         _export(page, doc, os.path.join(draw_dir, spec.name + ".pdf"),
-                holes=spec.holes)
+                holes=partdesign.dimensions_of(spec)
+                if getattr(spec, "declared", False)
+                else list(getattr(spec, "dimension_circles", ()) or ()))
         App.closeDocument(doc.Name)
 
     doc = App.newDocument("assembly_pdf")

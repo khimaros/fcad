@@ -49,8 +49,8 @@ FEM = {"__default__": {"fixed": [fs.min_along("x")],
                        "mesh_size": 10.0}}
 
 def compute(p):
-    return [fcad.Part("bar", placements=[App.Placement()],
-                      solid=lambda: Part.makeBox(p["length"], p["width"], p["height"]))]
+    return [fcad.PartSpec("bar", placements=[App.Placement()],
+                          solid=lambda: Part.makeBox(p["length"], p["width"], p["height"]))]
 '''
 NAME = "bar"
 TARGET = "bar"
