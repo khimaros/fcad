@@ -16,6 +16,8 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtWidgets
 
+from fcad import config
+
 SOLID_TYPES = ("Part::Extrusion", "Part::Feature", "Part::FeaturePython")
 DIST = os.environ.get("FCAD_DIST", os.path.join(os.getcwd(), "dist"))
 
@@ -53,7 +55,8 @@ def _paths():
     one = os.path.join(parts_dir, part + ".FCStd")
     if part and os.path.exists(one):
         return [one]
-    return sorted(glob.glob(os.path.join(parts_dir, "*.FCStd")))
+    return sorted(p for p in glob.glob(os.path.join(parts_dir, "*.FCStd"))
+                  if config.is_part_doc(os.path.basename(p)))
 
 
 def main():

@@ -137,6 +137,7 @@ def _skill_checks(root):
     own_shipped = _read(os.path.join(
         os.path.dirname(os.path.abspath(fcad.__file__)),
         "resources", "skills", "fcad", "SKILL.md"))
+    notes = os.path.join(root, "fcad", "CONTRIBUTING.md")
     checks = [
         ("install-skill exits 0", rc == 0),
         ("installs SKILL.md", installed),
@@ -144,6 +145,18 @@ def _skill_checks(root):
          os.path.exists(own) and _read(own) == own_shipped),
         ("and that one carries no api/ it does not need",
          not os.path.exists(os.path.join(root, "fcad", "api"))),
+        # SKILL.md sends its reader to these by name, so they have to be there.
+        ("the fcad skill ships the examples it points at",
+         all(os.path.exists(os.path.join(root, "fcad", "examples", n, n + ".fcad"))
+             for n in ("hexnut", "fastenplates", "cantilever"))),
+        ("... the example's tests included",
+         os.path.exists(os.path.join(root, "fcad", "examples", "fastenplates",
+                                     "tests", "test_lap.py"))),
+        ("... and none of their build output",
+         not os.path.exists(os.path.join(root, "fcad", "examples",
+                                         "fastenplates", "dist"))),
+        ("the fcad skill ships the freecad notes it points at",
+         os.path.exists(notes) and "api notes" in _read(notes)),
         ("the fcad skill declares itself as such",
          own_shipped is not None and "name: fcad" in own_shipped),
         ("installs the shipped SKILL.md verbatim",

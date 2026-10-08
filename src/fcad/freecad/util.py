@@ -9,6 +9,7 @@ centralizes the headless gotchas we confirmed on FreeCAD 1.1.1:
 import json
 import math
 import os
+import time
 import zipfile
 
 import FreeCAD as App
@@ -21,6 +22,29 @@ from fcad.config import parts_path, placements_path  # noqa: F401  (re-exported)
 # bundled default is blank (no border, no block), so we ship one as package data.
 TEMPLATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "resources", "templates", "fcad_A4_landscape.svg")
+
+
+CLOCK_STEPS = 3              # how many of a build's dearest steps it names
+
+
+class Clock:
+    """what each step of a build cost, so a slow one names itself."""
+
+    def __init__(self):
+        self.spent, self._since = {}, time.monotonic()
+
+    def lap(self, step):
+        """charge the time since the last lap to `step`."""
+        now = time.monotonic()
+        self.spent[step] = self.spent.get(step, 0.0) + now - self._since
+        self._since = now
+
+    def line(self, label):
+        """`label: total (dearest steps)`, for the build's own output."""
+        dearest = sorted(self.spent, key=self.spent.get, reverse=True)[:CLOCK_STEPS]
+        return "%s: %.1f s (%s)" % (
+            label, sum(self.spent.values()),
+            ", ".join("%s %.1f s" % (step, self.spent[step]) for step in dearest))
 
 
 def add_varset(doc, project, values):
@@ -59,11 +83,9 @@ def export_svg(objs, path):
 # what a viewer should show: the solids of a part file, and the links plus the
 # container of an assembly. sketches, varsets, origins and joints stay hidden -
 # they are inputs and decoration, not the model.
-# what a viewer should show when the file opens. `PartDesign::Body` is the one
-# you see for a declared part - its own features carry shapes too, and showing
-# those as well would draw the part once per feature.
 VISIBLE_TYPES = ("App::Link", "Assembly::AssemblyObject", "Part::Extrusion",
                  "Part::Feature", "Part::FeaturePython", "PartDesign::Body")
+BODY_TYPE = "PartDesign::Body"
 
 # freecad's isometric orientation (rotation axis then angle); it describes a
 # direction, so it is the same for every model whatever its size.
@@ -98,11 +120,25 @@ _GUI_CAMERA = (
     '  height %.6f&#10;&#10;}&#10;"/>\n')
 
 
-def _visible_bbox(doc):
+def _shown(doc):
+    """names of the objects a viewer should draw when the file opens.
+
+    a body is on the list and so is its tip, because a body draws nothing
+    itself: in its default display mode it shows through to the tip feature.
+    hide the tip and the part opens blank, which is what every declared part
+    did. the features before the tip stay hidden - each carries the shape as it
+    stood at that step, and showing them draws the part once per feature."""
+    names = {o.Name for o in doc.Objects if o.TypeId in VISIBLE_TYPES}
+    tips = {o.Tip.Name for o in doc.Objects
+            if o.TypeId == BODY_TYPE and o.Tip is not None}
+    return names | tips
+
+
+def _visible_bbox(doc, shown):
     """bounding box of everything a viewer will show, or None."""
     bb = None
     for o in doc.Objects:
-        if o.TypeId not in VISIBLE_TYPES:
+        if o.Name not in shown:
             continue
         shape = getattr(o, "Shape", None)
         if shape is None or shape.isNull():
@@ -141,10 +177,12 @@ def export_gui_state(doc, path):
     defaulting whatever we leave out, so the Visibility flags plus a camera are
     enough and the build stays headless. call it right after saving, before
     adding anything the saved file does not contain."""
+    shown = _shown(doc)
     entries = "".join(
-        _GUI_VIEWPROVIDER % (o.Name, "true" if o.TypeId in VISIBLE_TYPES else "false")
+        _GUI_VIEWPROVIDER % (o.Name, "true" if o.Name in shown else "false")
         for o in doc.Objects)
-    xml = _GUI_DOC % (len(doc.Objects), entries, _camera(_visible_bbox(doc)))
+    xml = _GUI_DOC % (len(doc.Objects), entries,
+                      _camera(_visible_bbox(doc, shown)))
     with zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as z:
         z.writestr("GuiDocument.xml", xml)
 
@@ -164,15 +202,18 @@ def export_placements(placements, path):
 
 
 def export_parts(specs, path):
-    """write {part name: {grounded, embeds}} as json.
+    """write {part name: {grounded, embeds, color, transparency}} as json.
 
-    the two flags a renderer cannot recover from geometry: which part anchors the
-    model, and which parts are fasteners rather than structure. the assembly
-    animator needs both to arrive in a sensible order - build outward from the
-    anchor, drive the screws last - and it runs under plain python with no access
-    to the project that declared them."""
+    what a renderer cannot recover from geometry: which part anchors the model,
+    which parts are fasteners rather than structure, and what each looks like.
+    the assembly animator needs the first two to arrive in a sensible order -
+    build outward from the anchor, drive the screws last - and the renderer the
+    look. both run outside the build, with no access to the project that
+    declared them."""
     data = {spec.name: {"grounded": bool(getattr(spec, "grounded", False)),
-                        "embeds": bool(getattr(spec, "embeds", False))}
+                        "embeds": bool(getattr(spec, "embeds", False)),
+                        "color": getattr(spec, "color", None),
+                        "transparency": getattr(spec, "transparency", 0)}
             for spec in specs}
     with open(path, "w") as f:
         json.dump(data, f, indent=1, sort_keys=True)
@@ -430,7 +471,6 @@ def _page(doc, sources, directions, tag="", dims=False, title=None):
         view.Caption = label.upper()
         page.addView(view)
         views[label] = (view, col, row)
-    doc.recompute()
 
     # cell centers: columns left to right, rows top down (techdraw y grows up).
     block_w = sum(colw) * scale + gap * (ncols - 1)
@@ -445,6 +485,9 @@ def _page(doc, sources, directions, tag="", dims=False, title=None):
         acc -= h * scale + gap
     for view, col, row in views.values():
         view.X, view.Y = colx[col], rowy[row]
+    # one recompute for the views, placed before it rather than after: each
+    # one projects the whole model with hidden lines removed, which on a part
+    # of many small solids is most of the build, and moving a view repeats it.
     doc.recompute()
 
     if dims:

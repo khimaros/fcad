@@ -34,6 +34,16 @@ NUDGE = 1.5
 MIN_CAPTURE = 3
 # how far a part is dropped to ask what is under it.
 DROP = 2.0
+# shared volume below this is two faces touching, not two parts colliding.
+TOUCH_VOL = 1.0
+# the three lengths and volumes above are sized for lumber, and each is a
+# ceiling rather than the value used: a watch screw is a few mm^3 in total, so
+# a flat 1 mm^3 waves it through solid material, and a 0.5 mm gasket dropped
+# 2 mm falls clean through the plate it rests on and reads as unsupported. so a
+# volume is also capped at this fraction of the smaller solid involved, and a
+# probe distance at this fraction of the probing part's own extent.
+VOL_FRAC = 1e-3
+REACH_FRAC = 0.5
 # a void is judged as a fraction of the part's own blank, because real
 # clearances scale with the part and a mistake does not: the planter's grooved
 # corner post carries 0.2% in deliberate fit allowance, while a corner relieved
@@ -97,6 +107,21 @@ def fix_to_datum(module, asm, joints, datum, links):
         j.Reference2 = whole_of(asm, link)
 
 
+def touch_vol(*shapes):
+    """the shared volume above which `shapes` collide rather than touch."""
+    return min(TOUCH_VOL, VOL_FRAC * min(s.Volume for s in shapes))
+
+
+def fmt_vol(vol):
+    """a volume for a report: one decimal, or enough digits to not read 0.0."""
+    return ("%.1f" if vol >= 1.0 else "%.3g") % vol + " mm^3"
+
+
+def reach(limit, *extents):
+    """a probe distance: `limit`, or less for a part smaller than it."""
+    return min(limit, REACH_FRAC * min(extents))
+
+
 def placed_shapes(project, specs):
     """one placed BREP solid per instance, in assembly coordinates.
 
@@ -144,13 +169,14 @@ def void_baseline(project, spec):
     """the shape the void check measures against: the blank, openings kept.
 
     what it wants to know is how much *joinery* a part gave up, so cuts the
-    project called openings stay cut. a part with a tree names the sketches; one
+    project called openings stay cut, and so does what a dress-up took, which
+    is shaping rather than joinery. a part with a tree names the sketches; one
     supplying its own solid lists circles, which are bored from its stock
     outline the way they always were."""
     openings = list(getattr(spec, "openings", ()) or ())
     if getattr(spec, "declared", False):
         from fcad.freecad.partdesign import blank_of
-        return blank_of(spec, keep=set(openings))
+        return blank_of(spec, keep=set(openings), dressed=True)
     blank = blank_shape(project, spec)
     prof = project.profile(spec)
     if prof is None:
@@ -226,17 +252,20 @@ class Model:
 
     def blank(self, spec, placement):
         """the part before its joinery, placed. cached per part, which matters
-        here: deriving it suppresses and recomputes once per feature."""
+        here: deriving it builds the part again and recomputes it without its
+        cuts."""
         return self._placed(blank_shape, spec, placement)
 
     def baseline(self, spec, placement):
         """the blank with its openings still cut, placed. cached per part."""
         return self._placed(void_baseline, spec, placement)
 
-    def hit(self, shape, skip=None, tol=1.0):
-        """(name, volume) of the worst structural solid `shape` runs into."""
+    def hit(self, shape, skip=None, fasteners=False):
+        """(name, volume) of the worst structural solid `shape` runs into,
+        or of any solid at all when `fasteners` are asked for too."""
         worst, who = 0.0, None
-        for name, _, other in self.structural:
+        for name, _, other in self.structural + (
+                self.embedded if fasteners else []):
             if name == skip or not shape.BoundBox.intersect(other.BoundBox):
                 continue
             try:
@@ -248,7 +277,7 @@ class Model:
         return who, worst
 
 
-def find_overlaps(project, values, tol=1.0, model=None):
+def find_overlaps(project, values, model=None):
     """structural solids whose volumes interpenetrate (touching faces give zero
     common volume, so only real interference is reported). parts flagged
     `embeds` (e.g. screws, which intentionally sink into the wood) are excluded.
@@ -264,12 +293,12 @@ def find_overlaps(project, values, tol=1.0, model=None):
                 vol = si.common(sj).Volume
             except Exception:
                 vol = 0.0
-            if vol > tol:
+            if vol > touch_vol(si, sj):
                 hits.append((ni, nj, vol))
     return hits
 
 
-def find_unseated(project, values, tol=1.0, nudge=NUDGE, model=None):
+def find_unseated(project, values, nudge=NUDGE, model=None):
     """`embeds` parts that are not sitting in a cavity cut for them.
 
     `embeds` drops a part from `find_overlaps` precisely because it is meant to
@@ -297,13 +326,16 @@ def find_unseated(project, values, tol=1.0, nudge=NUDGE, model=None):
     bad = []
     for name, _, s in model.embedded:
         who, vol = hit(s)
+        tol = touch_vol(s)
         if vol > tol:
             bad.append((name, "interferes",
-                        "%.1f mm^3 into %s" % (vol, who)))
+                        "%s into %s" % (fmt_vol(vol), who)))
             continue
         held = 0
-        for axis in (V(nudge, 0, 0), V(-nudge, 0, 0), V(0, nudge, 0),
-                     V(0, -nudge, 0), V(0, 0, nudge), V(0, 0, -nudge)):
+        box = s.BoundBox
+        d = reach(nudge, box.XLength, box.YLength, box.ZLength)
+        for axis in (V(d, 0, 0), V(-d, 0, 0), V(0, d, 0),
+                     V(0, -d, 0), V(0, 0, d), V(0, 0, -d)):
             moved = s.copy()
             moved.Placement = App.Placement(s.Placement.Base + axis,
                                             s.Placement.Rotation)
@@ -320,12 +352,13 @@ def find_disjoint(project, values, model=None):
 
     a mortise from one direction meeting a housing from another inside the same
     post severs it, and the result is still a valid shape, still exports, still
-    renders as two pieces sitting exactly where one used to be. returns
-    (part, n_solids)."""
+    renders as two pieces sitting exactly where one used to be. a part flagged
+    `disjoint` is several pieces on purpose - the lit segments of a display -
+    and is not asked. returns (part, n_solids)."""
     model = model or Model(project, values)
     seen, bad = set(), []
     for _, spec, solid in model.structural + model.embedded:
-        if spec.name in seen:
+        if spec.name in seen or getattr(spec, "disjoint", False):
             continue
         seen.add(spec.name)
         n = len(solid.Solids)
@@ -335,7 +368,29 @@ def find_disjoint(project, values, model=None):
 
 
 def find_voids(project, values, budget=VOID_BUDGET, model=None):
-    """parts that give up material nothing else occupies.
+    """the parts `measure_voids` puts over the budget."""
+    return [v for v in measure_voids(project, values, model=model)
+            if v[2] > budget]
+
+
+def find_stray_openings(project, values, model=None):
+    """openings that name no cut, as (part, name).
+
+    an opening is matched against the sketch a cut was made from, and one that
+    matches nothing keeps nothing: the cut is measured as a void after all. a
+    big one then fails for a reason the project believes it has dealt with, and
+    a small one passes under the budget with the declaration doing nothing -
+    until the part changes and it does not."""
+    from fcad.freecad.partdesign import stray_openings
+    model = model or Model(project, values)
+    return [(spec.name, name) for spec in model.specs
+            if getattr(spec, "declared", False)
+            and getattr(spec, "openings", None)
+            for name in stray_openings(spec)]
+
+
+def measure_voids(project, values, model=None):
+    """how much each part that cuts anything gives up that nothing else occupies.
 
     two members that cross need exactly one of them to give way, over exactly
     the volume they share; relieve more than that and the surplus is an empty
@@ -347,9 +402,10 @@ def find_voids(project, values, budget=VOID_BUDGET, model=None):
     or a lap, which the old outline-and-thickness blank could not even see. the
     tolerance is a fraction of that blank, because real clearances (a groove
     ploughed wide, a blind mortise cut deep) scale with the part while a mistake
-    does not. returns (part, void_mm3, fraction)."""
+    does not. returns (part, void_mm3, fraction) for every such part, clean or
+    not, so a passing model can still be told how near the budget it runs."""
     model = model or Model(project, values)
-    seen, bad = set(), []
+    seen, sizes = set(), []
     for name, spec, solid in model.structural:
         if spec.name in seen:
             continue
@@ -367,13 +423,18 @@ def find_voids(project, values, budget=VOID_BUDGET, model=None):
             except Exception:
                 pass
         void = removed - filled
-        frac = void / blank.Volume if blank.Volume else 0.0
-        if frac > budget:
-            bad.append((spec.name, void, frac))
-    return bad
+        sizes.append((spec.name, void,
+                      void / blank.Volume if blank.Volume else 0.0))
+    return sizes
 
 
-def find_unsupported(project, values, drop=DROP, tol=1.0, model=None):
+def states_ground(model):
+    """whether the project flags any part `grounded`, which is what makes it a
+    physical stack that `find_unsupported` has something to say about."""
+    return any(getattr(s, "grounded", False) for s in model.specs)
+
+
+def find_unsupported(project, values, drop=DROP, model=None):
     """parts that nothing holds up.
 
     every piece in an assembly is carried by something: it is `grounded`, it
@@ -396,7 +457,7 @@ def find_unsupported(project, values, drop=DROP, tol=1.0, model=None):
     modelling a stack; one that leaves it to the auto-ground default has not, and
     is left alone. returns (instance,)."""
     model = model or Model(project, values)
-    if not any(getattr(s, "grounded", False) for s in model.specs):
+    if not states_ground(model):
         return []
     bad = []
     for name, spec, s in model.structural:
@@ -404,13 +465,16 @@ def find_unsupported(project, values, drop=DROP, tol=1.0, model=None):
             continue
         blank = model.blank(spec, s.Placement)
         if any(blank.BoundBox.intersect(e.BoundBox)
-               and blank.common(e).Volume > tol
+               and blank.common(e).Volume > touch_vol(blank, e)
                for _, _, e in model.embedded):
             continue                      # fastened, so gravity is not the story
         moved = s.copy()
-        moved.Placement = App.Placement(s.Placement.Base + V(0, 0, -drop),
+        fall = reach(drop, s.BoundBox.ZLength)
+        moved.Placement = App.Placement(s.Placement.Base + V(0, 0, -fall),
                                         s.Placement.Rotation)
-        if model.hit(moved, skip=name)[1] <= tol:
+        # a fastener counts as something to land on: one in a clearance hole
+        # shares no volume with the part even in its blank, yet carries it.
+        if model.hit(moved, skip=name, fasteners=True)[1] <= touch_vol(s):
             bad.append(name)
     return bad
 
@@ -513,6 +577,8 @@ def write_cutlist(project, specs, path):
     for prof, plan in out:
         for line in cutlist.summary(prof, plan):
             print(line)
+    if not out:
+        return                # nothing is cut from stock, so nothing to total
     # per-profile lines answer "how do I cut the 2x6"; nobody's shopping list is
     # one profile, so say what the whole model costs to buy.
     prices = {prof: cutlist.prices_for(project.stock, prof) for prof, _ in out}
@@ -605,6 +671,7 @@ def build_jointed_doc(project, values, data, parts_dir, path):
 
 
 def build(project, values, dirs, formats):
+    clock = fcutil.Clock()
     data = project.compute(values)
     specs = data["specs"]
 
@@ -622,6 +689,7 @@ def build(project, values, dirs, formats):
     if "cutlist" in formats:
         write_cutlist(project, specs,
                       os.path.join(dirs["dist"], project.name + "-cutlist.csv"))
+    clock.lap("lists")
 
     neutral = formats & {"step", "stl", "svg", "dxf", "drawing"}
     if neutral:
@@ -631,22 +699,30 @@ def build(project, values, dirs, formats):
         obj.Shape = compound
         doc.recompute()
         stem = os.path.join(dirs["dist"], project.name)
+        clock.lap("solids")
         if "step" in formats:
             fcutil.export_step([obj], stem + ".step")
+            clock.lap("step")
         if "stl" in formats:
             fcutil.export_stl([obj], stem + ".stl")
+            clock.lap("stl")
         if "svg" in formats:
             fcutil.export_svg_edges(compound, stem + ".svg")
+            clock.lap("svg")
         if "dxf" in formats:
             fcutil.export_dxf(doc, [obj], stem + ".dxf")
+            clock.lap("dxf")
         if "drawing" in formats:
             fcutil.make_drawing(doc, [obj],
                                 os.path.join(dirs["drawings"], "assembly.dxf"),
                                 ASM_VIEWS,
                                 title={"part": "assembly", "project": project.name})
+            clock.lap("drawing")
         App.closeDocument(doc.Name)
 
     if "fcstd" in formats:
         build_jointed_doc(project, values, data, dirs["parts"],
                           os.path.join(dirs["dist"], project.name + ".FCStd"))
+        clock.lap("fcstd")
+    print(clock.line("assembly"))
     return data

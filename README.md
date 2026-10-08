@@ -17,12 +17,12 @@ fcad is a uv-installable python package with a single `fcad` console script:
 
 ```
 uv tool install -e .            # core (build/validate/inspect/diff)
-uv tool install -e ".[render]"  # + the matplotlib renderer (render/animate/fem-*)
+uv tool install -e ".[render]"  # + animate and the fem pictures (fem-*)
 ```
 
 external requirements: FreeCAD 1.1.x on `PATH` (with the bundled Assembly,
-TechDraw and FEM workbenches); `ffmpeg` for `animate`/`fem-animate`; `gmsh` and
-`ccx` (CalculiX) on `PATH` for `fem`.
+TechDraw and FEM workbenches); `xvfb-run` for `render` and `animate`; `ffmpeg` for
+`animate`/`fem-animate`; `gmsh` and `ccx` (CalculiX) on `PATH` for `fem`.
 
 ## using it from a project
 
@@ -138,7 +138,8 @@ list below), and `from_spec`/`profile` (if your specs aren't `fcad.PartSpec`).
 
 `fcad.PartSpec(name, placements, build=..., solid=..., profile=..., length=...,
 grounded=..., embeds=..., dimension_sketches=..., dimension_circles=...,
-openings=..., profile2d=...)` is the ready-made spec. exactly one of `build`
+openings=..., profile2d=..., color=..., transparency=...)` is the ready-made
+spec (the last two are how `fcad render` draws the part). exactly one of `build`
 (your own FreeCAD code, the path to take) or `solid` (a thunk, for geometry that
 is not a body at all) describes the part; `profile` is the bom label, `length`
 the bom length -- **state it on any model you sweep**, or every `optimize`
@@ -181,7 +182,7 @@ defaults usually need no overrides.
 ```
 fcad build [TARGET ...]   build/export into dist/ (no target = all); TARGET:
                              parts assembly step stl svg dxf drawings sketches
-                             bom cutlist
+                             bom cutlist, or a part's name for that part alone
                           cutlist knobs: --stock/--kerf/--trim/--objective
 fcad check                the project's CONSTRAINTS, interference, and the
                              absences an overlap test cannot see: fasteners that
@@ -194,8 +195,12 @@ fcad optimize P [P ...]   sweep parameters for a cheaper cut list, refusing any
                              candidate that breaks a CONSTRAINT
 fcad view [parts]         open the assembly in the gui (or `view parts` for the
                              part files; --part NAME for a single one)
-fcad render [TARGET]      offscreen png of a built stl
-fcad animate [TARGET]     turntable mp4 + gif of a built stl
+fcad render [TARGET]      offscreen png in the parts' colours; --view, --parts,
+                             --exclude, --section, --explode, --size
+                             (dist/<name>.png, dist/parts/<part>.png)
+fcad animate [TARGET]     mp4 + gif in the parts' colours: the assembly building
+                             itself, or a part spinning; --camera, --subject,
+                             --speed, --fps, --size
 fcad fem [TARGET]         solve FEM (von Mises + displacement); --modal/--modes K
 fcad fem-render [TARGET]  png of a solved FEM result (deformed, colored by stress)
 fcad fem-animate [TARGET] deformation sweep + per-mode mp4/gif of a FEM result
@@ -214,7 +219,7 @@ fcad help [COMMAND]       show usage (top-level, or for one command)
 
 `TARGET` is `assembly` (default) or a part name (e.g. `corner_post`). the 3d diff
 is split into a compute step and a view step: `diff-build` bakes the green/red/grey
-split to `dist/<target>.diff.FCStd`, `diff-open` opens that instantly, and `diff`
+split to `dist/<name>.diff.FCStd` (a part's to `dist/parts/`), `diff-open` opens that instantly, and `diff`
 chains the two. see a project's Makefile (e.g. the `planter` repo) for canonical,
 incremental invocations.
 
@@ -236,7 +241,8 @@ and the camera is already an isometric fit of the model. the build bakes that
 view state itself, with no display involved.
 
 while iterating, `fcad build <TARGET>` rebuilds a single artifact (e.g.
-`fcad build assembly`) for a fast loop. to tweak parameters live in the gui,
+`fcad build assembly`, or `fcad build post` for the part named `post`) for a
+fast loop. to tweak parameters live in the gui,
 `fcad install-macro` once, then run `fcad_rebuild` from FreeCAD's Macro menu: it
 reads the open document's `Parameters` panel and regenerates it. that indirection
 is needed because part and hole **counts** are parametric, so a plain recompute
@@ -354,7 +360,7 @@ is reported as a warning, not dropped.
 
 `fcad fem [TARGET]` meshes a built target (gmsh) and solves it with CalculiX
 headlessly, writing the analysis doc plus a numpy result bundle
-(`dist/<target>.fem.{FCStd,npz}`). `fcad fem-render` then draws the deformed
+(`dist/<name>.fem.{FCStd,npz}`, or `dist/parts/<part>.fem.*`). `fcad fem-render` then draws the deformed
 surface colored by von Mises stress, and `fcad fem-animate` writes a deformation
 sweep plus one animation per eigenmode (`--modal`/`--modes K`). the `assembly`
 target fuses the structural solids into one bonded body; a single part is solved
@@ -423,13 +429,17 @@ so a flexing orbit runs four cycles per turn (`FCAD_FEM_CYCLES`). the camera is
 azimuth, or the orbit's start) and `FCAD_TILT` (sweep amplitude; 0 makes an orbit
 hold its elevation) in every renderer.
 
-`fcad animate` writes `dist/assemble_<target>.{mp4,gif}`: the parts flying in one
+`fcad animate` writes `dist/<name>.assemble.{mp4,gif}`: the parts flying in one
 at a time to build the model. that is the default for the assembly, because a
 model building itself says more in ten seconds than a spin does; a single part
 has nothing to assemble, so `fcad animate beam` spins instead. `--subject static`
-orbits the finished assembly when that is what you want. it uses the part STLs
+orbits the finished assembly when that is what you want. it uses the parts
 plus the placements a build records, not the assembly STL -- that one is a single
 welded lump with no part boundaries left in it.
+
+the frames are drawn by the viewer `fcad render` uses, so a clip looks like the
+stills: each part in its `color` and `transparency`, shaded and outlined.
+`--size WxH` sets the frame (default 960x720).
 
 the arrival order matters more than it sounds, and fcad reads it off flags your
 project already declares. `--order grounded` (the default) lands the parts
@@ -578,7 +588,9 @@ fcad install-skill        # -> ~/.claude/skills/{fcad,freecad-python}/
 
 installs both skills fcad ships. **`fcad`** is fcad's own contract: the project
 surface (`PARAMS` + `compute`, `fcad.PartSpec`, `FEM`, `STOCK`), the cli, what lands
-in `dist/`, and the traps that are fcad's own. **`freecad-python`** is the
+in `dist/`, and the traps that are fcad's own. this README, `CONTRIBUTING.md` and
+the `examples/` sources are installed beside it, since it points at all three.
+**`freecad-python`** is the
 FreeCAD api underneath it: scripting rules and traps, 52 curated pages of the
 FreeCAD wiki (CC0), and the `api/` reference above generated for *your* FreeCAD.
 that last part is why that one cannot just be committed somewhere complete --
@@ -604,8 +616,122 @@ if you clone the full wiki export in beside it your extra pages survive.
 fcad is pre-1.0 and breaks its contract when the contract is wrong. what has
 changed, and what is coming, so a project can move at its own pace.
 
-**nothing below breaks a project today.** every item is either a loosened check,
-a norm worth adopting, or a change announced ahead of it landing.
+most items are a loosened check, a norm worth adopting, or a change announced
+ahead of it landing. the ones that can stop a working project say so.
+
+- **what is made from a target is named after it and sits beside it.** this can
+  break a script or a README that names those files. the assembly's outputs go
+  next to `<name>.FCStd` and a part's next to `parts/<part>.FCStd`:
+
+  | was | is, for the assembly | is, for a part |
+  | --- | --- | --- |
+  | `render_<target>.png` | `<name>.png` | `parts/<part>.png` |
+  | `assemble_<target>.{mp4,gif}` | `<name>.assemble.{mp4,gif}` | |
+  | `spin_<target>.{mp4,gif}` | `<name>.spin.{mp4,gif}` | `parts/<part>.spin.{mp4,gif}` |
+  | `<target>.fem.{FCStd,npz}` | `<name>.fem.{FCStd,npz}` | `parts/<part>.fem.{FCStd,npz}` |
+  | `fem_<target>.{png,mp4,gif}` | `<name>.fem.{png,mp4,gif}` | `parts/<part>.fem.{png,mp4,gif}` |
+  | `fem_<target>_mode<K>` | `<name>.fem.mode<K>` | `parts/<part>.fem.mode<K>` |
+  | `<target>.diff.FCStd` | `<name>.diff.FCStd` | `parts/<part>.diff.FCStd` |
+
+  a render's default name also carries the `--view`, `--section` and
+  `--explode` it was asked for (`<name>.top.png`), so a second view no longer
+  overwrites the first. an explicit output path is unaffected. a solved FEM
+  result is looked for under its new name only, so **re-run `fcad fem`** (or
+  move the `.npz`) before `fem-render`. the old files are not removed:
+  `fcad clean`, or delete them.
+
+- **`check` says `skipped` when it did not test support.** the "held up by
+  something" assertion only applies to a model that flags a part `grounded`,
+  and used to print `check ok` either way. it still passes; it no longer claims
+  a result. `partdesign.subtractive` takes `(doc)`, no longer `(doc, body)`.
+
+- **`PartSpec(disjoint=True)`: a part that is several pieces on purpose.**
+  `check` reports a part in more than one solid as severed by its own joinery,
+  which left no way to model the lit segments of a display as one part. a part
+  flagged `disjoint` is not asked, and the passing line names it. nothing
+  changes for a project that does not use the flag.
+
+- **an opening that names no cut fails `check`.** this can stop a working
+  project. `openings` is matched against the *sketch* a cut was made from; a
+  feature name or a typo used to match nothing and say nothing, so the cut was
+  measured as a void after all and only passed if it was small. `check` now
+  names each one. the passing void line also reports the largest fraction it
+  measured against the 1% budget (`build_assembly.measure_voids` returns them
+  all), and addon chatter printed while FreeCAD starts is dropped with the
+  banner.
+
+- **quieter still.** FreeCAD's own three-line banner is dropped with the
+  kernel's, a part with a dress-up no longer prints `Invalid edge link` on every
+  build, and loading a `.fcad` leaves no `__pycache__/` beside it.
+
+- **`fcad render` is drawn by the FreeCAD viewer, and needs `xvfb-run`.** it
+  used to paint the assembly STL one colour with matplotlib, under plain python.
+  it now draws each part in the `color=`/`transparency=` its `PartSpec` declares
+  and takes `--view`, `--parts`, `--exclude`, `--section` and `--explode`. a
+  project that declares no colours still renders, in grey. the look is recorded
+  by the build, so rebuild before rendering a project built by an older fcad.
+
+- **`fcad animate` is drawn by that viewer too, and also needs `xvfb-run`.** a
+  clip used to be the STLs in one colour inside matplotlib's axes, decimated to
+  keep the redraw affordable. its frames are now the stills' - the parts' real
+  geometry in their declared colours, on a plain background - and `--size` sets
+  them. `FCAD_DPI` and `FCAD_CLUSTER` no longer apply to it. the arrival order,
+  the cameras and the clip length are unchanged.
+
+- **a dress-up no longer counts against the void budget.** what a Fillet or
+  Chamfer removes used to be measured as a void, so a bevel big enough to see
+  failed `check` with no way to declare it meant (`openings` names sketches,
+  and a dress-up has none). it is now left out. nothing that passed stops
+  passing. a cut that shapes a part some other way still goes in `openings`.
+
+- **`fcad build <part>` builds one part**, `add_sketch` no longer slows
+  quadratically with the size of the sketch (forty loops took 35 s and now take
+  none worth measuring), and `--explode` may be written before the target.
+
+- **a build says what each part cost.** one line per part and one for the
+  assembly, naming the dearest steps (`part case: 11.2 s (drawing 6.0 s, ...)`).
+  a script that reads build output line by line will see them. drawings are
+  also about twice as quick on a part with a lot of edges: each view was being
+  projected twice.
+
+- **`partdesign.add_text` puts lettering in a declared part.** a Pocket off it
+  engraves and a Pad raises it, so a part no longer has to drop to `solid=` to
+  carry words. it defaults to a font FreeCAD ships.
+
+- **a build that crashes exits non-zero.** this can stop a script that was
+  passing by accident. an exception fcad did not raise itself (a bad keyword in
+  a project's `build`) used to reach the terminal as one `Exception while
+  processing file` line under an exit status of 0, `fcad precommit` included.
+  it now prints the traceback and exits 1.
+
+- **quieter again.** a dress-up based on another dress-up (a chamfer on a
+  fillet) no longer prints forty `missing element reference` lines a build, and
+  fcad's lines no longer land in the middle of the kernel's `Postprocessing...`.
+  `fcad render --exclude lid out.png` draws the assembly: a lone `.png` is the
+  output path.
+
+- **`check` has a tenth assertion: every feature changes its part.** a pocket
+  run the wrong way used to pass silently with its hole missing. a project with
+  such a feature now fails `check`, which names it.
+
+- **two `check` assertions were wrong on small or hollow parts and are fixed.**
+  a pad cut by a through pocket (a gasket, a frame) had its *pad* classed as the
+  cut, so a declared opening read as a ~45% void and an undeclared one passed. a
+  part held by a fastener in a clearance hole read as unsupported.
+
+- **`partdesign.add_sketch` takes `loops=`**: further closed polygons in the
+  same sketch, so a window or ring is one sketch and one Pad.
+
+- **build output is quiet.** the kernel's banners and progress bars are dropped;
+  `FCAD_VERBOSE=1` brings them back.
+
+- **`check` thresholds scale with the part.** interference used to mean more
+  than 1 mm^3 shared, the seating nudge was 1.5 mm and the support drop 2 mm,
+  flat. those are ceilings now: the volume is also capped at 0.1% of the smaller
+  solid, the distances at half the probing part's extent. nothing changes for a
+  model of large parts. a model of millimetre parts may newly fail `check` on an
+  overlap that was always there, and stops failing on correctly seated small
+  fasteners and thin parts resting on thin parts.
 
 - **declared holes no longer read as missing material.** `check`'s void test and
   its sketch-drift note used to measure a part against its bare outline, so a

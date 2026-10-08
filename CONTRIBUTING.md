@@ -65,6 +65,38 @@ entrypoints work around gotchas the gui session introduces:
      (`App.closeDocument`) so no unsaved-changes dialog blocks `fcad pdf`, then
      `os._exit(0)`: a normal qt exit segfaults tearing down the techdraw gui
      scenes, but the pdfs are already written synchronously by then.
+- **render:** `render_view.py` draws with the gui's viewer under `xvfb-run -a`
+  and saves with `view.saveImage(path, w, h, "White")`, once for `render` and
+  once per frame for `animate`. six traps, each found by looking at a wrong png:
+  1. **every camera call animates.** `viewIsometric()`, `viewTop()` and
+     `setCameraOrientation()` all start a transition, and a capture taken
+     mid-flight is tilted and has its clipping planes in the wrong place, so
+     whole layers go missing. write the orientation onto the node instead:
+     `view.getCameraNode().orientation.setValue(*rotation.Q)`, then `fitAll()`.
+  2. **whole-number colours are read on a 0..255 scale.** `ShapeColor = (1, 0,
+     0)` with ints draws near-black; json round-trips `1.0` as `1`, so cast to
+     float.
+  3. **the gui takes python's stdout** for its report view. a line meant for the
+     terminal goes to `sys.__stdout__`.
+  4. **exit with `os._exit`**, as `export_pdf` does.
+  5. **`xvfb-run` alone does not keep it offscreen.** it sets `DISPLAY`, and Qt
+     prefers wayland whenever `WAYLAND_DISPLAY` is set, so on a wayland desktop
+     the gui opened a real window per render. the child is run with
+     `QT_QPA_PLATFORM=xcb`; `QApplication.platformName()` then reads `xcb` and
+     `DISPLAY` is xvfb's.
+  6. **an offscreen capture does not move the clipping planes.** `fitAll()`
+     sets them; a camera positioned by hand, as `animate`'s is on every frame
+     so the zoom holds still, draws an empty png until `nearDistance` and
+     `farDistance` are written too. moving an object's `Placement` between
+     captures needs no event-loop pump.
+  a body's colour cannot be baked into a headless `.FCStd` the native way:
+  `obj.ShapeMaterial` accepts a `Materials.Material` with a Basic Rendering
+  appearance, saves, and the gui ignores it on open. the gui's own colours live
+  in a binary `ShapeAppearance` member of the zip, which the build does not
+  write, so built files open grey.
+- **body visibility:** a `PartDesign::Body` draws nothing itself in its default
+  `Through` display mode; it shows its tip feature. bake the body *and its tip*
+  visible, and the features before the tip hidden.
 - **view:** `view.py` opens the assembly read-only and forces component
   Visibility/fit. it does **not** recompute on load: the build saves the doc
   fully baked (it purges the joints' touched flags; see the Assembly note

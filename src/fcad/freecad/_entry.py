@@ -10,6 +10,32 @@ the right binary (headless vs gui) and exported the FCAD_* / DIFF_* env vars.
 import os
 import sys
 
+BEGIN_ENV = "FCAD_BEGIN"        # mirrors fcad._run, which is not importable yet
+
+
+class _Ordered:
+    """python's stdout, kept in step with C stdio's.
+
+    FreeCAD's console and the kernel write through C stdio, python through its
+    own buffer, and into a pipe the two reach the file in whatever order their
+    buffers happen to fill: a line of ours once overtook the startup banner, and
+    another landed in the middle of a progress word the kernel had half
+    written. flushing C stdio ahead of each write, and ours straight after,
+    keeps both whole and in the order they were said."""
+
+    def __init__(self, stream):
+        import ctypes
+        self._stream, self._libc = stream, ctypes.CDLL(None)
+
+    def write(self, text):
+        self._libc.fflush(None)
+        written = self._stream.write(text)
+        self._stream.flush()
+        return written
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
 
 def _bootstrap():
     # .../fcad/freecad/_entry.py -> the directory that holds the fcad package
@@ -32,6 +58,11 @@ def main(argv):
     - it never prints the message a `SystemExit` carries, so the deliberate
       diagnostics ("CalculiX produced no result for ... try a smaller mesh_size")
       vanished outright. so we print those ourselves and exit 1."""
+    sys.stdout = _Ordered(sys.stdout)
+    # the cli's marker for where FreeCAD's startup output ends and ours begins;
+    # the text is the cli's, handed over in the environment.
+    if os.environ.get(BEGIN_ENV):
+        print(os.environ[BEGIN_ENV])
     _bootstrap()
     try:
         _route(argv[0] if argv else "all", argv[1:])
@@ -39,6 +70,12 @@ def main(argv):
         if not isinstance(e.code, str):
             raise
         print(e.code)
+        raise SystemExit(1)
+    except Exception:
+        # freecadcmd reports an uncaught exception as one line and exits 0, so
+        # a build that crashed passed for anything reading the status.
+        import traceback
+        traceback.print_exc(file=sys.stdout)
         raise SystemExit(1)
     finally:
         sys.stdout.flush()
@@ -56,6 +93,12 @@ def _route(cmd, args=()):
     elif cmd == "view-parts":
         from fcad.freecad import view_parts
         view_parts.main()
+    elif cmd == "render":
+        from fcad.freecad import render_view
+        render_view.main()
+    elif cmd == "animate":
+        from fcad.freecad import render_view
+        render_view.main(render_view.film)
     elif cmd == "pdf":
         from fcad.freecad import export_pdf
         export_pdf.main()
@@ -75,10 +118,6 @@ def _route(cmd, args=()):
     else:
         from fcad.freecad import dispatch
         from fcad.loader import load_project
-        if cmd not in dispatch.TARGETS and cmd not in ("check", "precommit",
-                                                       "optimize"):
-            sys.stderr.write("fcad: unknown command %r\n" % cmd)
-            raise SystemExit(2)
         project = load_project()
         if cmd == "check":
             dispatch.check(project)

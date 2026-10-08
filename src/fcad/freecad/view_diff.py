@@ -12,6 +12,8 @@ import os
 
 import FreeCAD as App
 
+from fcad import config
+
 try:
     import FreeCADGui as Gui
     from PySide import QtWidgets
@@ -21,9 +23,10 @@ except Exception:
 GREEN = (0.0, 0.8, 0.0)
 RED = (0.85, 0.0, 0.0)
 GREY = (0.6, 0.6, 0.6)
-_DIST = os.environ.get("FCAD_DIST", os.path.join(os.getcwd(), "dist"))
-_TARGET = os.environ.get("DIFF_TARGET", "assembly")
-path = os.environ.get("FCAD_DIFF", os.path.join(_DIST, _TARGET + ".diff.FCStd"))
+_CFG = config.from_env()
+path = os.environ.get("FCAD_DIFF") or config.artifact_stem(
+    _CFG.dist, _CFG.name, os.environ.get("DIFF_TARGET", config.ASSEMBLY),
+    config.DIFF) + config.DOC_EXT
 
 
 def _color(name):

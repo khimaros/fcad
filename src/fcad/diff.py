@@ -25,9 +25,10 @@ import subprocess
 import sys
 import tempfile
 
+from fcad import config
 from fcad._run import run_entry
 
-DIFF_SUFFIX = ".diff.FCStd"
+DIFF_SUFFIX = "." + config.DIFF + config.DOC_EXT
 # the git diff driver's name: `[diff "fcad"] command = ...` plus an attribute
 # line binding the built documents to it.
 GIT_DRIVER = "fcad"
@@ -42,7 +43,7 @@ GIT_LINGUIST = "*.fcad linguist-language=Python gitlab-language=python"
 
 
 def _diff_path(cfg, target):
-    return os.path.join(cfg.dist, target + DIFF_SUFFIX)
+    return config.artifact_stem(cfg.dist, cfg.name, target) + DIFF_SUFFIX
 
 
 def _git(root, *args):

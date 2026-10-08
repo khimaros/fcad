@@ -21,6 +21,7 @@ $RESULT_FILE.
 
 import os
 import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,20 +45,21 @@ def _block(doc, body, size):
                             size, name="block")
 
 def compute(p):
-    return [fcad.PartSpec("block", placements=[Placement()],
-                          build=lambda doc, body: _block(doc, body, p["size"]))]
+    return [fcad.PartSpec(name, placements=[Placement()],
+                          build=lambda doc, body: _block(doc, body, p["size"]))
+            for name in ("block", "cap")]
 '''
 NAME = "distproj"
 
 
-def _build(root, dist=None):
+def _build(root, dist=None, target="parts"):
     """run one build in a child process, as the cli would; (rc, output)."""
     path = os.path.join(root, NAME + ".fcad")
     with open(path, "w") as f:
         f.write(PROJECT)
     cfg = config.resolve(project=path, dist=dist)
     env = {**os.environ, **cfg.env()}
-    r = subprocess.run([cfg.freecad, entry_path(), "parts"],
+    r = subprocess.run([cfg.freecad, entry_path(), target],
                        env=env, capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr, cfg.dist
 
@@ -100,6 +102,24 @@ def main():
           % (_built(os.path.join(plain, "dist", "parts")),),
           any(f.startswith("block")
               for f in _built(os.path.join(plain, "dist", "parts"))))
+
+        # R2.2: a part's name is a target too, and builds that part alone -
+        # which is how one slow part gets timed or iterated on.
+        solo = tempfile.mkdtemp(prefix="fcad_dist_solo_", dir=root)
+        rc, out, resolved = _build(solo, target="cap")
+        made = _built(os.path.join(resolved, "parts"))
+        c("a part name builds that part (%d, %s)" % (rc, made),
+          rc == 0 and "cap.FCStd" in made and "cap.step" in made)
+        c("... and no other", not any(f.startswith("block") for f in made))
+        # finding the slow part should not mean timing each target by hand.
+        timed = re.search(r"^part cap: \d+\.\d s \(\w+ \d+\.\d s(, \w+ \d+\.\d s)*\)$",
+                          out, re.M)
+        c("a build says what each part cost, and its dearest steps (%r)"
+          % (timed and timed.group(0)), timed is not None)
+        rc, out, _ = _build(solo, target="nosuch")
+        c("a target that is neither fails (%d)" % rc, rc != 0)
+        c("... naming it and the parts there are (%r)" % out.strip(),
+          "nosuch" in out and "block" in out and "cap" in out)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     return c.report()

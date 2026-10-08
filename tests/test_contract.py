@@ -180,17 +180,22 @@ def main():
            not any(vis.get(n) for n in of("App::Plane")))
         fits(cam, bb, "assembly")
 
-        # a declared part is a body, and the body is what a viewer shows: its
-        # own features carry shapes too, and showing those as well would draw
-        # the part once per feature.
-        vis, types, cam, bb = view_state(os.path.join(d["parts"], "plate.FCStd"))
+        # a declared part is a body, and a body draws nothing itself: it shows
+        # through to its tip. so the tip must be visible or the part opens
+        # blank, and the features before it hidden or it is drawn once each.
+        plate = os.path.join(d["parts"], "plate.FCStd")
+        vis, types, cam, bb = view_state(plate)
         of = lambda t: [n for n, ty in types.items() if ty == t]
         bodies = of("PartDesign::Body")
+        tips = body_tips(plate)
         ck("part bakes gui view state", bool(vis))
         ck("part body opens visible (%d)" % len(bodies),
            bool(bodies) and all(vis.get(n) for n in bodies))
-        ck("part features stay hidden behind the body",
-           not any(vis.get(n) for n in of("PartDesign::Pad")))
+        ck("part body's tip opens visible (%s)" % ", ".join(tips),
+           bool(tips) and all(vis.get(n) for n in tips))
+        ck("part features before the tip stay hidden",
+           not any(vis.get(n) for n, ty in types.items()
+                   if ty.startswith("PartDesign::") and n not in bodies + tips))
         ck("part defining sketch stays hidden",
            not any(vis.get(n) for n in of("Sketcher::SketchObject")))
         fits(cam, bb, "part")
@@ -303,6 +308,16 @@ def view_state(path):
     finally:
         App.closeDocument(doc.Name)
     return vis, types, cam, bb
+
+
+def body_tips(path):
+    """the name of each body's tip feature in a saved document."""
+    doc = App.openDocument(path)
+    try:
+        return [o.Tip.Name for o in doc.Objects
+                if o.TypeId == "PartDesign::Body" and o.Tip is not None]
+    finally:
+        App.closeDocument(doc.Name)
 
 
 if any(a.endswith("test_contract.py") for a in sys.argv):

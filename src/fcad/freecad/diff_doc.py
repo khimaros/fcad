@@ -271,7 +271,7 @@ def _bake(layers, label, doc=None):
 def diff(new_dir, old_dir, target="assembly", doc=None):
     """diff two built dist/ trees (what `fcad diff` compares)."""
     layers = (_combine(_dist_parts(new_dir), _dist_parts(old_dir))
-              if target in ("assembly", NAME)
+              if config.is_assembly(NAME, target)
               else _single_part_layers(new_dir, old_dir, target))
     return _bake(layers, target, doc)
 

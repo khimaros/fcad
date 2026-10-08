@@ -41,6 +41,8 @@ DETAIL_TYPES = (
     "Part::Mirroring", "Part::Refine",
     "PartDesign::Body", "PartDesign::Pad", "PartDesign::Pocket",
     "PartDesign::Revolution", "PartDesign::Fillet", "PartDesign::Chamfer",
+    "PartDesign::Hole", "PartDesign::Groove", "PartDesign::AdditiveLoft",
+    "PartDesign::AdditivePipe", "PartDesign::LinearPattern",
     "Sketcher::SketchObject",
     "Assembly::AssemblyObject", "Assembly::JointGroup",
     "TechDraw::DrawPage", "TechDraw::DrawViewPart", "TechDraw::DrawViewDimension",

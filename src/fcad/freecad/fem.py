@@ -8,9 +8,10 @@ faces, partial supports, loads, self-weight, gravity direction, mesh size, modes
 absent that, a convention fallback (fix the min-Z faces, self-weight, steel) so any
 project still yields a result. target "all" solves every case the project declares.
 
-the result is written two ways: `<target>.fem.FCStd` (the analysis document) and
-`<target>.fem.npz`, a FreeCAD/VTK-free numpy bundle (boundary surface + per-node
-von Mises, displacement and mode shapes) that the plain-python renderer consumes.
+the result is written two ways, beside the target's own files (see
+`config.artifact_stem`): `.fem.FCStd` (the analysis document) and `.fem.npz`, a
+FreeCAD/VTK-free numpy bundle (boundary surface + per-node von Mises,
+displacement and mode shapes) that the plain-python renderer consumes.
 """
 
 import contextlib
@@ -25,7 +26,7 @@ import ObjectsFem
 from femmesh import gmshtools
 from femtools import ccxtools
 
-from fcad import fem_select as fs, limits
+from fcad import config, fem_select as fs, limits
 from fcad.loader import load_project
 from fcad.freecad import build_assembly, dispatch
 
@@ -659,7 +660,8 @@ def _solve(project, values, target, dist, work):
         out["mode_freqs"] = np.array([r.EigenmodeFrequency for r in results], np.float32)
         out["mode_disp"] = np.array([_disp(r, node_ids) for r in results], np.float32)
 
-    doc.saveAs(os.path.join(dist, target + ".fem.FCStd"))
+    doc.saveAs(config.artifact_stem(dist, project.name, target, config.FEM)
+               + config.DOC_EXT)
     App.closeDocument(doc.Name)
     return out
 
@@ -687,7 +689,8 @@ def main(target="assembly"):
         # this bundle (render, animate, a person quoting a number) has no other
         # way to tell. see `stale_reason`.
         out["source"] = stamp
-        path = os.path.join(dist, name + ".fem.npz")
+        path = config.artifact_stem(dist, project.name, name,
+                                    config.FEM) + ".npz"
         np.savez_compressed(path, **out)
         print("fem ok: target=%s nodes=%d modes=%d vm_p95=%.2f MPa "
               "vm_max=%.1f MPa disp=%.3f mm -> %s" %

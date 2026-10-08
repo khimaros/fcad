@@ -45,9 +45,9 @@ from fcad import config
 from fcad.render import render
 
 # how far out a part starts, as a multiple of its offset from the assembly
-# centre. big enough to read as "apart", small enough to keep the view cube
-# usable - the cube is squared to the *assembled* model, so parts fly in from
-# outside the frame and that is fine.
+# centre. big enough to read as "apart". the camera is fitted to the
+# *assembled* model, so the finished state fills the frame and parts fly in
+# from outside it: the last second is what a viewer actually looks at.
 EXPLODE = float(os.environ.get("FCAD_EXPLODE", 1.6))
 # how many parts may be in the air at once, which is the thing that actually
 # reads. a fixed flight duration does not survive the part count: at 0.45 of the
@@ -67,8 +67,8 @@ AT_ONCE = max(1, int(os.environ.get("FCAD_AT_ONCE", 3)))
 FLIGHT_SECONDS = float(os.environ.get("FCAD_FLIGHT_SECONDS", 1.2))
 SETTLE_SECONDS = float(os.environ.get("FCAD_SETTLE_SECONDS", 1.0))
 # mm of slack when deciding two instances touch. a built model's parts meet
-# exactly, but its stls are faceted and then decimated onto a grid, so "exactly"
-# needs a tolerance wider than the decimation moved anything.
+# exactly, but its stls are faceted, and a part that sits a clearance away from
+# its neighbour is still one someone would call touching.
 CONTACT = float(os.environ.get("FCAD_CONTACT", 6.0))
 
 
@@ -82,11 +82,11 @@ def _matrix(quat):
         np.float32)
 
 
-def instances(name, dist, grid):
+def instances(name, dist):
     """[(label, placed triangles)] for every instance the assembly build wrote.
 
-    each part's stl is loaded once and decimated once, then re-posed per
-    instance: a part used twenty times costs one load and twenty transforms."""
+    each part's stl is loaded once, then re-posed per instance: a part used
+    twenty times costs one load and twenty transforms."""
     with open(config.placements_path(dist, name)) as f:
         placements = json.load(f)
     out = []
@@ -94,7 +94,7 @@ def instances(name, dist, grid):
         path = render.stl_path(part, name, dist)
         if not os.path.exists(path):
             continue
-        tris = render.cluster(render.load_tris(part, name, dist), grid)
+        tris = render.load_tris(part, name, dist)
         for i, (base, quat) in enumerate(placements[part]):
             posed = tris @ _matrix(quat).T + np.array(base, np.float32)
             out.append(("%s.%d" % (part, i), posed.astype(np.float32)))

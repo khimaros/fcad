@@ -9,16 +9,16 @@ placements means, and all this one needs. a lap held by a single screw is
 physically a pivot, so a project that wanted it to swing would declare
 `assemble` and joint the plates with a `Revolute` instead; see the skill.
 
-both parts are PartDesign bodies, by the two routes fcad offers. the **plate uses
-the shorthand**: an outline in `profile2d` and a bore in `fastener_holes`, and
-fcad pads and bores it. the **screw writes FreeCAD code**: it is turned, which no
-outline describes, so `build` gets a live document and an empty body and makes a
-`PartDesign::Revolution` out of a half-section. fcad has no vocabulary in the
-way - a Revolution is not a thing fcad knows about - and the result is as real
-and as editable as the plate.
+both parts are PartDesign bodies, and both come from a `build` that is handed a
+live document and an empty body. the **plate calls the helper**:
+`partdesign.pad_and_bore` pads an outline and bores it, which is the shape most
+parts are. the **screw writes the FreeCAD calls itself**: it is turned, which no
+outline describes, so it makes a `PartDesign::Revolution` out of a half-section.
+fcad has no vocabulary in the way - a Revolution is not a thing fcad knows
+about - and the result is as real and as editable as the plate.
 
-reach for the shorthand when it fits and for `build` when it does not; `solid=`
-remains for geometry that is not a body at all.
+reach for the helper when it fits and for your own calls when it does not;
+`solid=` remains for geometry that is not a body at all.
 
 the screw sinks into both plates, so `embeds` is what keeps the interference
 check (and the FEM fuse) from calling that a collision. drop the flag and `check`
@@ -27,9 +27,9 @@ screw to the seating check instead, which asks whether it sits in a hole bored
 for it. so the plates are drilled to the shank's own diameter -- a screw driven
 into undrilled wood, or turned across its own bore, is caught there. the screw
 also needs an explicit `length`, since the bom would otherwise take its bbox
-x-extent, which for a screw standing on Z is the head diameter. the bores go in
-`fastener_holes` rather than `holes`, so they are drawn on the plate's sketch but
-left off the dimensioned drawing.
+x-extent, which for a screw standing on Z is the head diameter. the plate's bore
+is listed in `openings` (it is meant to stay empty of plate) but not in
+`dimension_sketches`, so it is in the part and left off the dimensioned drawing.
 
 all geometry is centered by construction rather than translated, so the
 assembly's placements cannot shift a part.

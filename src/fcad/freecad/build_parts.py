@@ -10,7 +10,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 
-from fcad import types
+from fcad import config, types
 from fcad.freecad import partdesign, util as fcutil
 
 V = App.Vector
@@ -54,6 +54,7 @@ def _outline_sketch(doc, spec, pts, thickness):
 
 
 def build_one(project, spec, values, dirs, formats):
+    clock = fcutil.Clock()
     doc = App.newDocument(spec.name)
     fcutil.add_varset(doc, project, values)
     if is_declared(spec):
@@ -76,14 +77,18 @@ def build_one(project, spec, values, dirs, formats):
         obj.Shape = project.from_spec(spec)
     obj.Visibility = True
     doc.recompute()
+    clock.lap("solid")
 
     stem = os.path.join(dirs["parts"], spec.name)
     if "step" in formats:
         fcutil.export_step([obj], stem + ".step")
+        clock.lap("step")
     if "stl" in formats:
         fcutil.export_stl([obj], stem + ".stl")
+        clock.lap("stl")
     if "svg" in formats:
         fcutil.export_svg_edges(obj.Shape, stem + ".svg")
+        clock.lap("svg")
     # save the part file before the drawing exports: dxf/drawing/sketch all add
     # TechDraw pages to the document, and we want the saved .FCStd to contain
     # only the part (varset + sketch + solid) so it opens straight to the model.
@@ -92,39 +97,62 @@ def build_one(project, spec, values, dirs, formats):
     if "fcstd" in formats:
         doc.saveAs(stem + ".FCStd")
         fcutil.export_gui_state(doc, stem + ".FCStd")
+        clock.lap("fcstd")
     if "dxf" in formats:
         fcutil.export_dxf(doc, [obj], stem + ".dxf")
+        clock.lap("dxf")
     if "drawing" in formats:
         fcutil.make_drawing(doc, [obj],
                             os.path.join(dirs["drawings"], spec.name + ".dxf"),
                             PART_VIEW, holes=holes,
                             title={"part": spec.name, "project": project.name})
+        clock.lap("drawing")
     if "sketch" in formats and sketches:
         fcutil.export_sketch(doc, sketches,
                              os.path.join(dirs["sketches"], spec.name))
+        clock.lap("sketch")
     App.closeDocument(doc.Name)
+    print(clock.line("part " + spec.name))
 
 
-def build(project, values, dirs, formats):
+def build(project, values, dirs, formats, only=None):
+    """build every part, or just the one named `only`."""
     data = project.compute(values)
+    names = [spec.name for spec in data["specs"]]
+    if only is not None and only not in names:
+        raise SystemExit("fcad build: %r is neither a target nor a part. "
+                         "parts: %s" % (only, ", ".join(names) or "none"))
     for spec in data["specs"]:
-        build_one(project, spec, values, dirs, formats)
+        if only in (None, spec.name):
+            build_one(project, spec, values, dirs, formats)
     return data
+
+
+def _in_part_files(parts_dir, pick):
+    """'<file>/<object>' for every object `pick(doc)` returns, over the built
+    part files. reading the files validates the artifact, not a rebuild of it."""
+    found = []
+    for fn in sorted(os.listdir(parts_dir)):
+        if not config.is_part_doc(fn):
+            continue
+        doc = App.openDocument(os.path.join(parts_dir, fn))
+        try:
+            found.extend("%s/%s" % (fn, o.Name) for o in pick(doc))
+        finally:
+            App.closeDocument(doc.Name)
+    return found
 
 
 def find_loose_sketches(parts_dir):
     """defining sketches in the built part files that are not fully constrained
     (have leftover degrees of freedom). returns '<file>/<sketch>' names."""
-    loose = []
-    for fn in sorted(os.listdir(parts_dir)):
-        if not fn.endswith(".FCStd"):
-            continue
-        doc = App.openDocument(os.path.join(parts_dir, fn))
-        try:
-            for o in doc.Objects:
-                if (o.TypeId == "Sketcher::SketchObject"
-                        and not getattr(o, "FullyConstrained", False)):
-                    loose.append("%s/%s" % (fn, o.Name))
-        finally:
-            App.closeDocument(doc.Name)
-    return loose
+    return _in_part_files(parts_dir, lambda doc: [
+        o for o in partdesign.sketch_objects(doc)
+        if not getattr(o, "FullyConstrained", False)])
+
+
+def find_inert_features(parts_dir):
+    """features in the built part files that left their part unchanged: a cut
+    run away from the material, a pad buried in what was already there. returns
+    '<file>/<feature>' names."""
+    return _in_part_files(parts_dir, partdesign.inert_features)

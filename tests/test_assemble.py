@@ -14,9 +14,10 @@ the joint graph is deliberately not the source: `build_jointed_doc` fixes every
 non-grounded part to one datum, so it is a star and every part is one hop from
 the anchor. it makes the assembly constrained; it does not describe contact.
 
-runs the real renderer over a synthesized dist (two stls, placements, flags), so
-what is under test is the sequencing and the writing, not FreeCAD. needs
-numpy-stl + matplotlib: run with `freecadcmd tests/test_assemble.py`.
+runs the real planner over a synthesized dist (two stls, placements, flags), so
+what is under test is the sequencing, not FreeCAD; the clip being drawn is
+tests/test_render.py's. needs numpy-stl + matplotlib: run with
+`freecadcmd tests/test_assemble.py`.
 """
 
 import json
@@ -260,9 +261,15 @@ def _length_checks():
 
 
 def _render_checks(root):
-    """R4.3: it writes the clip, from the part stls and the placements."""
+    """R4.3: what it will and will not plan, from the part stls and placements.
+
+    the clip itself needs the viewer and a real build; tests/test_render.py
+    draws one. these refusals all come before a frame is asked for."""
     from stl import mesh as stl_mesh
     from fcad.render import animate
+
+    def draw(plan):
+        raise AssertionError("refused clips must not reach the viewer")
 
     dist = os.path.join(root, "dist")
     os.makedirs(os.path.join(dist, "parts"))
@@ -279,41 +286,32 @@ def _render_checks(root):
     with open(config.parts_path(dist, NAME), "w") as f:
         json.dump(FASTENED_MARKS, f)
 
-    stem = os.path.join(root, "clip")
-    animate.animate("assembly", stem, name=NAME, dist=dist)
-    made = [os.path.getsize(stem + ext) for ext in (".mp4", ".gif")]
-
     # a part target has nothing to assemble, and assembling everything anyway
     # would animate something the caller did not ask for.
     try:
-        animate.animate("plate", os.path.join(root, "p"), name=NAME, dist=dist,
-                        subject="assemble")
+        animate.animate(draw, "plate", os.path.join(root, "p"), name=NAME,
+                        dist=dist, subject="assemble")
         mismatched = None
     except SystemExit as e:
         mismatched = str(e)
-    spun = os.path.join(root, "spun")
-    animate.animate("plate", spun, name=NAME, dist=dist, subject="static")
 
     empty = os.path.join(root, "empty")
     os.makedirs(os.path.join(empty, "parts"))
     with open(config.placements_path(empty, NAME), "w") as f:
         json.dump({}, f)
     try:
-        animate.animate("assembly", os.path.join(root, "x"), name=NAME,
+        animate.animate(draw, "assembly", os.path.join(root, "x"), name=NAME,
                         dist=empty, subject="assemble")
         refused = None
     except SystemExit as e:
         refused = str(e)
     return [
-        ("animate defaults to assembling, no --subject needed",
-         all(s > 1000 for s in made)),
         ("a part target with --subject assemble is refused, not guessed at",
          mismatched is not None and "names the part 'plate'" in mismatched),
         ("and is told how to get what it probably wanted",
          mismatched is not None and "--subject static" in mismatched),
-        ("a part still spins on its own", os.path.getsize(spun + ".gif") > 1000),
         ("an instance whose part stl is missing is skipped, not fatal",
-         len(assemble.instances(NAME, dist, 0.0)) == 2),
+         len(assemble.instances(NAME, dist)) == 2),
         ("nothing to assemble fails loudly", refused is not None
          and "no part stls" in refused),
         ("and says what to build first", refused is not None

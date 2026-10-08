@@ -135,7 +135,95 @@ def main():
     checks.extend(_opening_checks())
     checks.extend(_undrilled_checks())
     checks.extend(_disjoint_checks())
+    checks.extend(_scale_checks())
     return report(checks)
+
+
+# --- the same assertions on millimetre parts ------------------------------
+#
+# every fixture above is lumber-sized, and so were the tolerances: 1 mm^3 of
+# overlap ignored, a 1.5 mm nudge, a 2 mm drop. a watch screw is a few mm^3 in
+# total, so on a small model those numbers pass the failures and fail the
+# correct joints. the fixtures below are the ones above shrunk until they do.
+
+SMALL_PLATE = (6.0, 6.0, 2.0)
+SMALL_PIN_R = 0.3            # 0.85 mm^3 in total: under the old 1 mm^3 floor
+SMALL_PIN_LEN = 3.0
+SHIM = (6.0, 6.0, 0.5)       # thinner than the old 2 mm drop
+
+
+class _SmallSeat(_Project):
+    """`_Project` at watch scale: a 0.6 mm pin in a 2 mm plate."""
+
+    def from_spec(self, spec):
+        if spec.name == "plate":
+            l, w, t = SMALL_PLATE
+            block = Part.makeBox(l, w, t, V(-l / 2.0, -w / 2.0, -t / 2.0))
+            return block.cut(Part.makeCylinder(SMALL_PIN_R, t + 2.0,
+                                               V(0, 0, -t / 2.0 - 1.0)))
+        return Part.makeCylinder(SMALL_PIN_R, SMALL_PIN_LEN,
+                                 V(0, 0, -SMALL_PIN_LEN / 2.0))
+
+
+class _SmallPair:
+    """two 2 mm cubes sharing a slab `depth` thick."""
+
+    name = "tsmall"
+
+    def __init__(self, depth):
+        self._depth = depth
+
+    def compute(self, values):
+        return {"specs": [
+            _Spec("a", [App.Placement()]),
+            _Spec("b", [App.Placement(V(2.0 - self._depth, 0, 0),
+                                      App.Rotation())])]}
+
+    def from_spec(self, spec):
+        return Part.makeBox(2, 2, 2, V(-1, -1, -1))
+
+    def defaults(self):
+        return {}
+
+
+def _scale_checks():
+    out = []
+
+    class _Shims(_Stack):
+        """`_Stack` at watch scale: a 0.5 mm shim on a 0.5 mm grounded shim."""
+
+        def from_spec(self, spec):
+            if spec.name == "pin":
+                return Part.makeCylinder(SMALL_PIN_R, SMALL_PIN_LEN,
+                                         V(0, 0, -SMALL_PIN_LEN / 2.0))
+            l, w, t = SHIM
+            return Part.makeBox(l, w, t, V(-l / 2.0, -w / 2.0, -t / 2.0))
+
+    # 0.5 mm^3 shared between two 8 mm^3 cubes is 6% of either, not rounding.
+    hits = build_assembly.find_overlaps(_SmallPair(0.125), {})
+    out.append(("small parts sharing 0.5 mm^3 overlap (%d)" % len(hits),
+                len(hits) == 1))
+    out.append(("small parts sharing only a face do not",
+                not build_assembly.find_overlaps(_SmallPair(0.0), {})))
+
+    ok = build_assembly.find_unseated(_SmallSeat(_seated()), {})
+    out.append(("a small pin in its bore is seated (%s)" % (ok or "clean",),
+                not ok))
+    bad = build_assembly.find_unseated(_SmallSeat(_crossways()), {})
+    out.append(("a small pin across its bore interferes (%s)" % (bad,),
+                [b[1] for b in bad] == ["interferes"]))
+
+    resting = build_assembly.find_unsupported(_Shims(SHIM[2]), {})
+    out.append(("a shim resting on a shim is supported (%s)"
+                % (resting or "clean",), not resting))
+    floating = build_assembly.find_unsupported(_Shims(5.0), {})
+    out.append(("a shim hanging in the air is caught (%s)" % (floating,),
+                floating == ["block_001"]))
+    pinned = build_assembly.find_unsupported(
+        _Shims(5.0, pin=App.Placement(V(0, 0, 5.0), App.Rotation())), {})
+    out.append(("a shim on a small pin is fastened (%s)" % (pinned or "clean",),
+                not pinned))
+    return out
 
 
 # --- the other absence-of-geometry checks --------------------------------
@@ -217,6 +305,26 @@ def _support_checks():
     out.append(("a fastened block is not reported as falling (%s)"
                 % (pinned or "clean",), not pinned))
 
+    # a clearance hole shares no volume with its fastener even in the blank,
+    # when the hole is part of the outline rather than a cut. the fastener
+    # still carries the part: drop it and it lands on the pin.
+    class _Hung(_Stack):
+        """the hanging block again, on a cross pin through an oversize hole."""
+
+        def from_spec(self, spec):
+            if spec.name == "pin":
+                return Part.makeCylinder(3.0, 60.0, V(-30, 0, 0), V(1, 0, 0))
+            block = Part.makeBox(40, 40, 20, V(-20, -20, -10))
+            if spec.name == "base":
+                return block
+            return block.cut(Part.makeCylinder(3.5, 42.0, V(-21, 0, 0),
+                                               V(1, 0, 0)))
+
+    hung = build_assembly.find_unsupported(
+        _Hung(50.0, pin=App.Placement(V(0, 0, 50), App.Rotation())), {})
+    out.append(("a block hung on a pin through a clearance hole is held (%s)"
+                % (hung or "clean",), not hung))
+
     # and a model that never says what stands on the ground is left alone -
     # "held up by something" is a claim about a physical stack, and plenty of
     # models are not one.
@@ -277,6 +385,16 @@ def _void_checks():
     out.append(("a bar relieved far past the crossing is caught (%s)"
                 % ([n for n, _, _ in loose],),
                 [n for n, _, _ in loose] == ["bar"]))
+    # the figure itself, for a part that passes as much as one that fails: 120
+    # relieved of a 200 bar at half its thickness, less the 20 the post fills.
+    sizes = {n: frac for n, _, frac in
+             build_assembly.measure_voids(_Relieved(120.0), {})}
+    want = (120.0 - _Relieved.OVERLAP) / _Relieved.BAR[0] / 2.0
+    out.append(("its void is measured as %.2f of the blank (%s)" % (want, sizes),
+                abs(sizes.get("bar", 0.0) - want) < 1e-6))
+    sizes = build_assembly.measure_voids(_Relieved(_Relieved.OVERLAP), {})
+    out.append(("and a clean relief is measured too, at zero (%s)" % (sizes,),
+                [n for n, _, _ in sizes] == ["bar"] and abs(sizes[0][2]) < 1e-6))
     return out
 
 
@@ -294,15 +412,15 @@ class _Bored:
     PLATE = (75.0, 75.0, 30.0)
     BORE = 20.0
 
-    def __init__(self, opening=True):
-        self._opening = opening
+    def __init__(self, opening=True, named="hex_bore1"):
+        self._opening = [named] if opening else []
 
     def compute(self, values):
         l, w, t = self.PLATE
         pts = [(-l / 2, -w / 2), (l / 2, -w / 2), (l / 2, w / 2), (-l / 2, w / 2)]
         return {"specs": [_DeclaredSpec(
             "hex", [App.Placement()], pts, t, [(0.0, 0.0, self.BORE)],
-            grounded=True, openings=["hex_bore1"] if self._opening else [])]}
+            grounded=True, openings=self._opening)]}
 
     def from_spec(self, spec):
         return spec.solid()
@@ -381,6 +499,15 @@ def _opening_checks():
     out.append(("the same bore not declared one is still caught (%s)"
                 % ([n for n, _, _ in undeclared],),
                 [n for n, _, _ in undeclared] == ["hex"]))
+    # an opening is matched by the name of the cut's sketch. one that names
+    # anything else - the feature, a typo - keeps nothing, and on a bore small
+    # enough to sit under the budget nothing else would ever say so.
+    stray = build_assembly.find_stray_openings(_Bored(named="hex_hole1"), {})
+    out.append(("an opening that names no cut's sketch is caught (%s)" % (stray,),
+                stray == [("hex", "hex_hole1")]))
+    clean = build_assembly.find_stray_openings(_Bored(), {})
+    out.append(("one that names the bore's sketch is not (%s)"
+                % (clean or "clean",), not clean))
     return out
 
 

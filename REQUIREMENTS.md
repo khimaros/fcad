@@ -53,10 +53,15 @@ never regress on them.
 - R2.2 `build` accepts target tokens that select a subset:
   `parts assembly step stl svg dxf drawings sketches bom cutlist`; no token means
   `all`. multiple tokens union. stage-specific tokens keep their meaning
-  (`sketches` parts-only, `bom`/`cutlist` assembly-only).
+  (`sketches` parts-only, `bom`/`cutlist` assembly-only). a token that is a
+  part's name builds that part alone, in every part format; one that is
+  neither fails, naming the parts there are.
 - R2.3 the assembly `.FCStd` is a true Assembly-workbench assembly: each instance
   is an `App::Link` into its part file, grounded or fixed-jointed and solved.
 - R2.4 every build runs headlessly with no display (`freecadcmd`).
+- R2.4.1 a build reports what each part and the assembly cost, and on which
+  steps, so the slow one is found by reading the output rather than by timing
+  targets one at a time.
 - R2.5a a saved `.FCStd` opens showing its model, framed, on a plain double-click,
   with no viewer command and no display involved in producing it. the build bakes
   the view state (a `GuiDocument.xml` in the zip): the part solids, the assembly's
@@ -102,7 +107,8 @@ never regress on them.
 - R3.1.2 `check` must also assert the things an interference test is
   structurally unable to see, because they are *absences*: a part with nothing
   holding it up, a cut larger than the joint it relieves, a circle a part
-  dimensions but never bores, a part severed by its own joinery. each renders
+  dimensions but never bores, a part severed by its own joinery (unless the
+  project flags the part `disjoint`, saying the pieces are meant). each renders
   and exports exactly like a correct one. a check that only looks for overlap
   cannot see a joint that is wrong in the other direction. an assertion may be
   retired only when the failure it names becomes *unrepresentable*, not merely
@@ -113,11 +119,37 @@ never regress on them.
 - R3.1.4 a cut that is *meant* to stay empty is not a defect. no geometry
   distinguishes a nut's bore from a lap relieved twice as wide as its crossing
   member, so a project declares which is which (`openings`) and the void
-  assertion of R3.1.2 measures against a baseline that keeps them.
+  assertion of R3.1.2 measures against a baseline that keeps them. an opening
+  names the sketch its cut was made from, and one that names no cut fails
+  `check` rather than silently keeping nothing. a dress-up (fillet, chamfer) is
+  the one cut whose type does say what it is, shaping and never joinery, so the
+  baseline keeps those without being told. a passing void assertion states
+  the largest fraction it measured and the budget, so a model can see how near
+  it runs without first failing.
+- R3.1.5 the assertions of R3.1 to R3.1.2 hold at any model scale. a threshold
+  that is right for lumber is wrong for a watch: 1 mm^3 of shared volume is
+  rounding on a board and most of a 1.4 mm screw. so each absolute threshold
+  (the touching volume, the seating nudge, the support drop) is a ceiling, and
+  is reduced in proportion to the part under test when that part is small. a
+  model of metre-scale parts must see no change from this.
+- R3.1.6 `check` fails on a feature that leaves its part unchanged, and names
+  it. a cut run away from the material succeeds, reports up-to-date and removes
+  nothing; the part builds and the hole is simply not there.
+- R3.1.7 a build's output is fcad's own. the kernel's STEP banners, progress
+  bars and solver trace are dropped by the cli, because a verdict nobody can
+  find among several hundred lines has not been reported; `FCAD_VERBOSE`
+  restores them. no line fcad prints may be dropped with them. what FreeCAD
+  and its addons print while starting up is dropped too, whatever it says; if
+  FreeCAD never reaches fcad's entry, that output is shown instead.
+- R3.1.8 an assertion that did not run says `skipped` and why, never `ok`: a
+  model with no part flagged `grounded` is not tested for support, and a
+  verdict nobody computed must not read as one that passed.
 - R3.1.3 a project may declare `CONSTRAINTS`: predicates over its own computed
   values saying when the model still means what it says. `check` asserts them
   and reports the ones that broke, by whatever name the predicate gives itself.
-- R3.2 `precommit` builds everything, then runs `check`.
+- R3.2 `precommit` builds everything, then runs `check`. a build that raises,
+  under `precommit` or `build`, exits non-zero and prints the traceback: a
+  crash must never read as a pass.
 - R3.3 `test` runs a project's `tests/test_*.py` and judges each by the verdict
   it wrote, never by its exit status or its stdout: `freecadcmd` exits 0 on an
   uncaught exception and discards buffered stdout when it does not, so a runner
@@ -142,10 +174,30 @@ never regress on them.
 - R4.1 `view` opens the assembly in the gui with every component visible and the
   view fitted. `view parts` opens the built part files view-ready and stays open;
   `--part NAME` opens a single part.
-- R4.2 `render [TARGET]` writes an offscreen shaded PNG of a built STL under plain
-  python3 (no display). `TARGET` is `assembly` (default) or a part name.
-- R4.3 `animate [TARGET]` writes an MP4 + GIF of a built model under plain
-  python3, over a camera axis and a subject axis.
+- R4.2 `render [TARGET]` writes an offscreen PNG of a built target, drawn by the
+  FreeCAD viewer under a virtual display (`xvfb-run`): no window appears and no
+  real display is needed. `TARGET` is `assembly` (default) or a part name. it
+  must be able to show what was built, which one colour from one camera fitted
+  to the whole model cannot: each part is drawn in the `color` and
+  `transparency` its spec declares, `--parts`/`--exclude` choose what is drawn
+  and so what the camera fits, `--view` picks the camera, `--section` cuts the
+  model in half and `--explode` lifts the parts apart. it reads only what a
+  build wrote (part STEP files, placements, per-part look), never the project.
+  a render that cannot be made exits non-zero and says why. given one
+  positional ending `.png`, that is the output and the target is the assembly.
+- R4.2.1 what a command draws or solves for a target sits beside the target's
+  own files and is named after them. its `<stem>` is `dist/<name>` for the
+  assembly and `dist/parts/<part>` for a part, the same stem its `.FCStd` and
+  exports carry, so a render is `<stem>.png` - one more export of the model -
+  and a stress plot `<stem>.fem.png` beside the `<stem>.fem.npz` it draws. a
+  render's default name carries the view, section and explosion asked for, so
+  one variant does not overwrite another. a document made from a part
+  (`<stem>.fem.FCStd`) is not itself checked or opened as a part.
+- R4.3 `animate [TARGET]` writes an MP4 + GIF of a built model, over a camera
+  axis and a subject axis. its frames are drawn by the viewer `render` uses
+  (R4.2), offscreen, so a clip has a still's look: each part in the `color` and
+  `transparency` its spec declares. the clip is planned and encoded under plain
+  python3; `--size` sets the frame's pixels.
   the **camera** is `orbit` (a full turn while the elevation sweeps, so every
   side plus top and bottom comes into view; the default), `turntable` (that turn
   held level) or `fixed`. it is the same camera every other renderer uses, so
@@ -165,9 +217,9 @@ never regress on them.
   runs far longer than three. `--speed` multiplies that, `--fps` sets the frame
   rate, and the frame count is their product rather than a third setting;
   `--seconds` forces an exact length when one is needed.
-  `assemble` is driven by the part STLs plus `<name>-placements.json` and
-  `<name>-parts.json`, never the assembly STL, which is one welded lump with no
-  part boundaries left in it. the arrival order (`--order`) defaults to
+  `assemble` is sequenced from the part STLs plus `<name>-placements.json` and
+  `<name>-parts.json`, and drawn from the part STEP files, never the assembly
+  STL, which is one welded lump with no part boundaries left in it. the arrival order (`--order`) defaults to
   `grounded`: the parts flagged `grounded` first, then repeatedly the lowest part
   that touches what is already placed, with `embeds` parts held to the end. no
   part may arrive floating, a fastener must not arrive before the structure it
@@ -180,7 +232,7 @@ never regress on them.
   from that worktree's own copy of the design (never the working tree's, whether
   the project is a directory or a `.fcad` file). because the booleans are the slow
   part it is split: `diff-build [TARGET]` bakes the result to
-  `dist/<target>.diff.FCStd` headless, `diff-open [TARGET]` opens that instantly in
+  `<stem>.diff.FCStd` (R4.2.1) headless, `diff-open [TARGET]` opens that instantly in
   the gui, and `diff [TARGET]` chains the two. the diff is computed **per part**:
   each part type is diffed against its own previous version once, in the part-local
   frame, and the result placed at each instance, so the boolean count tracks the
@@ -234,7 +286,9 @@ never regress on them.
   few dozen means the reference is silently near-empty.
 - R5.6 `install-skill [--dir DIR] [--force]` installs the agent skills fcad ships
   (default under `~/.claude/skills/`). two of them: `fcad`, which is fcad's own
-  contract and ships complete as prose, and `freecad-python`, which documents the
+  contract and ships complete as prose - with everything its `SKILL.md` names
+  beside it: `README.md`, `CONTRIBUTING.md` and the `examples/` sources (never
+  their build output) - and `freecad-python`, which documents the
   FreeCAD api underneath it and cannot ship complete. the latter installs its
   `SKILL.md` verbatim, a curated
   subset of the FreeCAD wiki (CC0) covering the scripting semantics introspection
@@ -253,8 +307,8 @@ never regress on them.
 ## R6 - FEM (finite-element analysis)
 
 - R6.1 `fem [TARGET]` runs a headless CalculiX linear-static analysis of a built
-  target and saves both the analysis document (`dist/<target>.fem.FCStd`) and a
-  FreeCAD/VTK-free numpy bundle (`dist/<target>.fem.npz`) holding the boundary
+  target and saves both the analysis document (`<stem>.fem.FCStd`, R4.2.1) and a
+  FreeCAD/VTK-free numpy bundle (`<stem>.fem.npz`) holding the boundary
   surface plus per-node von Mises stress and displacement. it runs with no display
   and without VTK. `TARGET` is `assembly` (default) or a part name; the assembly is
   the structural solids fused into one bonded body (parts flagged `embeds` excluded).
@@ -318,6 +372,7 @@ never regress on them.
 ## external requirements
 
 FreeCAD 1.1.x (with the bundled Assembly, TechDraw and FEM workbenches) on `PATH`.
-`render`/`animate`/`fem-render`/`fem-animate` need the `[render]` extra (numpy,
-numpy-stl, matplotlib); the animators also need `ffmpeg`. `fem` additionally needs
+`render` and `animate` need `xvfb-run` on `PATH`.
+`animate`/`fem-render`/`fem-animate` need the `[render]` extra (numpy, numpy-stl, matplotlib); the animators also need
+`ffmpeg`. `fem` additionally needs
 `gmsh` (mesher) and `ccx`/CalculiX (solver) on `PATH`.

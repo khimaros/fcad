@@ -19,6 +19,10 @@ CAMERAS = ("orbit", "turntable", "fixed")
 SUBJECTS = ("all", "flex", "static", "modes")
 MESH_SUBJECTS = ("static", "assemble")
 ORDERS = ("grounded", "bottom-up", "top-down", "declared")
+# the still renderer's vocabulary. it is drawn by the FreeCAD gui rather than by
+# anything in this package, but the cli names its choices the same way.
+VIEWS = ("iso", "top", "bottom", "front", "back", "left", "right", "side")
+SECTIONS = ("x", "y", "z")
 # natural clip lengths in seconds, for the subjects that have nothing in them to
 # imply one - a camera orbit, a flex cycle, a mode. an assembly's length is
 # derived from its part count and concurrency instead (assemble.duration), since

@@ -83,7 +83,9 @@ class PartSpec:
     passes like bom and interference needn't pay for the booleans) and, when given,
     the defining 2d sketch from `profile2d`. qty and length are derived. flags:
     `grounded` anchors the assembly; `embeds` excludes a part that intentionally
-    sinks into others (e.g. screws) from the interference check and fem fuse.
+    sinks into others (e.g. screws) from the interference check and fem fuse;
+    `disjoint` says the part is several separate pieces on purpose, which
+    `check` otherwise reports as a part severed by its own joinery.
 
     **the well-lit path builds a PartDesign body.** `build` gets a live document
     and an empty `PartDesign::Body` and writes real FreeCAD code into it, so the
@@ -122,8 +124,14 @@ class PartSpec:
     def __init__(self, name, placements, build=None, solid=None, profile="",
                  length=None, grounded=False, embeds=False,
                  dimension_sketches=(), dimension_circles=(), openings=(),
-                 profile2d=None):
+                 profile2d=None, color=None, transparency=0, disjoint=False):
         self.name = name
+        self.disjoint = disjoint
+        # how `fcad render` draws the part: an (r, g, b) of 0..1 floats, and how
+        # see-through it is from 0 (solid) to 100. a look, not a material - it
+        # is what lets a crystal show the display under it.
+        self.color = tuple(color) if color is not None else None
+        self.transparency = transparency
         self.placements = list(placements)
         self._solid = solid           # () -> Part.Shape  (or a Part.Shape)
         self.profile = profile        # bom label, e.g. nominal lumber name

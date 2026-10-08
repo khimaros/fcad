@@ -53,26 +53,32 @@ def _from_globals(mod):
                    dist=cfg.dist, **kwargs)
 
 
-def _load_entry(path):
+def load_path(path, name="fcad_project"):
     """exec a standalone `.fcad` file (python) and return it as a module.
 
     its directory goes on sys.path first so a single-file project can still
-    import sibling helpers if it wants to."""
-    d = os.path.dirname(path)
+    import sibling helpers if it wants to. no bytecode is cached: a project is
+    one file its owner can see all of, and a `__pycache__/` appearing beside it
+    after every command is clutter to explain and to ignore."""
+    d = os.path.dirname(os.path.abspath(path))
     if d and d not in sys.path:
         sys.path.insert(0, d)
     # .fcad is not a registered source suffix, so name the loader explicitly.
-    loader = SourceFileLoader("fcad_project", path)
-    spec = importlib.util.spec_from_loader("fcad_project", loader)
+    loader = SourceFileLoader(name, path)
+    spec = importlib.util.spec_from_loader(name, loader)
     mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
+    keep, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = keep
     return mod
 
 
 def load_project():
     cfg = config.from_env()
     if cfg.entry:
-        mod = _load_entry(cfg.entry)
+        mod = load_path(cfg.entry)
     else:
         if cfg.project and cfg.project not in sys.path:
             sys.path.insert(0, cfg.project)

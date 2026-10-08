@@ -2,8 +2,9 @@
 
 it routes each command to the interpreter it needs (the user never chooses): the
 headless build/validate commands and the gui inspect commands run the in-FreeCAD
-entry under freecadcmd/freecad; render/animate run in-process under this python;
-diff orchestrates a git worktree. configuration (project/name/dist/binaries) is
+entry under freecadcmd/freecad; animate plans and encodes in-process and has that
+entry draw the frames; the fem pictures run in-process under this python; diff
+orchestrates a git worktree. configuration (project/name/dist/binaries) is
 resolved once from flags + environment and shared with the children.
 """
 
@@ -17,7 +18,8 @@ from fcad import __version__, config, cutlist
 from fcad._run import entry_path, run_entry
 # the animation vocabulary only; fcad.render is import-free at package level, so
 # naming these in --help costs nothing (importing the renderers pulls matplotlib).
-from fcad.render import CAMERAS, FEM_SECONDS, MESH_SUBJECTS, ORDERS, SUBJECTS
+from fcad.render import (CAMERAS, FEM_SECONDS, MESH_SUBJECTS, ORDERS, SECTIONS,
+                         SUBJECTS, VIEWS)
 
 # headless build/validate commands handled by freecad/_entry's dispatch path.
 BUILD_TARGETS = ["parts", "assembly", "step", "stl", "svg", "dxf",
@@ -40,6 +42,21 @@ SKILL_NAME_FCAD = "fcad"
 # the user documentation ships inside the fcad skill, so SKILL.md can reference
 # it rather than restating the contract in a second voice.
 README_NAME = "README.md"
+XVFB_RUN = "xvfb-run"
+# xvfb-run only sets DISPLAY, and Qt prefers wayland whenever WAYLAND_DISPLAY is
+# set - so on a wayland desktop the gui ignored the virtual display and opened a
+# window on the real one for every render. pinning the platform is what actually
+# keeps it offscreen.
+OFFSCREEN_ENV = {"QT_QPA_PLATFORM": "xcb"}
+PNG_EXT = ".png"
+EXPLODE_FLAG = "--explode"
+EXPLODE_GAP = 1.0               # the gap when the flag is given without one
+# what else SKILL.md sends its reader to by name: the FreeCAD gotchas already
+# absorbed, and the example projects (sources only, never their build output).
+SKILL_DOCS = (README_NAME, "CONTRIBUTING.md")
+EXAMPLES_NAME = "examples"
+EXAMPLE_SUFFIXES = (".fcad", ".py")
+EXAMPLE_SKIP = ("dist", "__pycache__")
 PKG_ROOT = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.expanduser("~/.claude/skills")
 # records which freecad the installed `api/` describes. the reference is only
@@ -69,7 +86,8 @@ def _build_parser():
 
     b = sub.add_parser("build", help="build/export into dist/ (default: all)")
     b.add_argument("targets", nargs="*", metavar="TARGET",
-                   help="one or more of: " + " ".join(BUILD_TARGETS) + " (none = all)")
+                   help="one or more of: " + " ".join(BUILD_TARGETS) + ", or a "
+                        "part's name to build that part alone (none = all)")
     # cutlist knobs: what stock is buyable, and what the shop loses cutting it.
     b.add_argument("--stock", action="append", metavar="SPEC",
                    help="cutlist stock lengths, overriding the project's STOCK: "
@@ -113,17 +131,33 @@ def _build_parser():
     v.add_argument("what", nargs="?", choices=["parts"], metavar="[parts]")
     v.add_argument("--part", metavar="NAME", help="with 'parts': open only this part")
 
-    r = sub.add_parser("render", help="offscreen png of a built stl")
+    r = sub.add_parser("render", help="offscreen png of a built model, in colour")
     r.add_argument("target", nargs="?", default="assembly",
                    help="part name or 'assembly' (default)")
     r.add_argument("out", nargs="?", metavar="PNG",
-                   help="output file (default <dist>/<target>.png)")
-    a = sub.add_parser("animate", help="turntable mp4 + gif of a built stl")
+                   help="output file (default <dist>/<name>.png, or "
+                        "<dist>/parts/<part>.png, with any "
+                        "--view/--section/--explode in the name)")
+    r.add_argument("--view", choices=VIEWS,
+                   help="camera (default iso, or side with --explode)")
+    r.add_argument("--parts", metavar="A,B",
+                   help="draw only these parts, and fit the camera to them")
+    r.add_argument("--exclude", metavar="A,B", help="draw everything but these")
+    r.add_argument(EXPLODE_FLAG, nargs="?", type=float, const=EXPLODE_GAP,
+                   metavar="GAP",
+                   help="lift the parts apart along z; GAP is a multiple of the "
+                        "tallest part (default 1)")
+    r.add_argument("--section", choices=SECTIONS,
+                   help="cut the model in half across this axis")
+    r.add_argument("--size", metavar="WxH", help="pixels (default 1600x1200)")
+    a = sub.add_parser("animate",
+                       help="mp4 + gif of a built model, drawn as render is")
     a.add_argument("target", nargs="?", default="assembly",
                    help="part name or 'assembly' (default)")
     a.add_argument("stem", nargs="?", metavar="STEM",
                    help="output path stem, .mp4/.gif appended "
-                        "(default <dist>/spin_<target>)")
+                        "(default <dist>/<name>.assemble, or .spin, beside "
+                        "the target's own files)")
     a.add_argument("--camera", choices=CAMERAS, default="orbit",
                    help="orbit every side incl. the underside (default), spin "
                         "level, or hold FCAD_ELEV/FCAD_AZIM")
@@ -144,6 +178,7 @@ def _build_parser():
                    help="with 'assemble': the sequence parts arrive in "
                         "(default outward from the part flagged `grounded` over "
                         "what touches what, fasteners last)")
+    a.add_argument("--size", metavar="WxH", help="pixels (default 960x720)")
 
     f = sub.add_parser("fem", help="solve FEM (von Mises + displacement; headless)")
     f.add_argument("target", nargs="?", default="assembly",
@@ -155,14 +190,16 @@ def _build_parser():
     fr.add_argument("target", nargs="?", default="assembly",
                     help="part name or 'assembly' (default)")
     fr.add_argument("out", nargs="?", metavar="PNG",
-                    help="output file (default <dist>/fem_<target>.png)")
+                    help="output file (default beside the result: "
+                         "<dist>/<name>.fem.png, <dist>/parts/<part>.fem.png)")
     fa = sub.add_parser("fem-animate",
                         help="deformation + modal mp4/gif of a FEM result")
     fa.add_argument("target", nargs="?", default="assembly",
                     help="part name or 'assembly' (default)")
     fa.add_argument("stem", nargs="?", metavar="STEM",
                     help="output path stem, .mp4/.gif appended "
-                         "(default <dist>/fem_<target>)")
+                         "(default beside the result, as for fem-render; "
+                         "modes as <stem>.mode<K>)")
     fa.add_argument("--camera", choices=CAMERAS, default="orbit",
                     help="orbit every side incl. the underside (default), spin "
                         "level, or hold FCAD_ELEV/FCAD_AZIM")
@@ -299,20 +336,41 @@ def _install_skill(cfg, skill_dir=None, force=False):
     return rc
 
 
-def _project_readme(skill):
-    """the user documentation, wherever this install put it.
+def _repo_path(skill, name):
+    """a repo-root file or directory, wherever this install put it.
 
-    it ships *into* the fcad skill so SKILL.md can point at it instead of
-    restating it - the two were drifting into two accounts of one contract. a
-    wheel carries it inside the skill directory (pyproject force-includes it);
-    an editable install has the real repo two levels above the package, so look
-    there too rather than shipping a copy that can go stale."""
-    for path in (os.path.join(skill, README_NAME),
-                 os.path.join(PKG_ROOT, os.pardir, os.pardir, README_NAME)):
-        text = _read(path)
-        if text:
-            return text
+    the README, the FreeCAD notes and the examples ship *into* the fcad skill so
+    SKILL.md can point at them instead of restating them - the two were drifting
+    into two accounts of one contract. a wheel carries them inside the skill
+    directory (pyproject force-includes them); an editable install has the real
+    repo two levels above the package, so look there too rather than shipping a
+    copy that can go stale."""
+    for path in (os.path.join(skill, name),
+                 os.path.join(PKG_ROOT, os.pardir, os.pardir, name)):
+        if os.path.exists(path):
+            return path
     return ""
+
+
+def _skill_docs(skill):
+    """{relative path: text} of everything the fcad skill ships beside SKILL.md.
+
+    the examples are sources only: a `.fcad` and its tests, never the `dist/`
+    or bytecode a build leaves beside them."""
+    found = {}
+    for name in SKILL_DOCS:
+        text = _read(_repo_path(skill, name))
+        if text:
+            found[name] = text
+    root = _repo_path(skill, EXAMPLES_NAME)
+    for here, dirs, files in os.walk(root) if root else ():
+        dirs[:] = sorted(d for d in dirs if d not in EXAMPLE_SKIP)
+        for f in sorted(files):
+            if f.endswith(EXAMPLE_SUFFIXES):
+                path = os.path.join(here, f)
+                rel = os.path.join(EXAMPLES_NAME, os.path.relpath(path, root))
+                found[rel] = _read(path)
+    return found
 
 
 def _install_one(cfg, root, base, name, force):
@@ -323,13 +381,12 @@ def _install_one(cfg, root, base, name, force):
     current whenever the shipped prose matches what is installed."""
     skill, out = os.path.join(root, name), os.path.join(base, name)
     wanted = _read(os.path.join(skill, "SKILL.md"))
-    readme = _project_readme(skill) if name == SKILL_NAME_FCAD else ""
+    docs = _skill_docs(skill) if name == SKILL_NAME_FCAD else {}
     api = os.path.join(out, "api")
     build = _freecad_build(cfg) if name == API_SKILL else ""
 
-    current = _read(os.path.join(out, "SKILL.md")) == wanted
-    if readme:
-        current = current and _read(os.path.join(out, README_NAME)) == readme
+    current = _read(os.path.join(out, "SKILL.md")) == wanted and all(
+        _read(os.path.join(out, rel)) == text for rel, text in docs.items())
     if name == API_SKILL:
         current = current and build and (
             _read(os.path.join(api, SKILL_STAMP)) or "").strip() == build
@@ -340,11 +397,12 @@ def _install_one(cfg, root, base, name, force):
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "SKILL.md"), "w") as f:
         f.write(wanted)
-    if readme:
-        with open(os.path.join(out, README_NAME), "w") as f:
-            f.write(readme)
+    for rel, text in docs.items():
+        os.makedirs(os.path.dirname(os.path.join(out, rel)), exist_ok=True)
+        with open(os.path.join(out, rel), "w") as f:
+            f.write(text)
     if name != API_SKILL:
-        print("installed skill: %s%s" % (out, "" if readme else
+        print("installed skill: %s%s" % (out, "" if README_NAME in docs else
                                          " (WARNING: no README.md found to ship)"))
         return 0
 
@@ -358,6 +416,34 @@ def _install_one(cfg, root, base, name, force):
             f.write(build + "\n")
     print("installed skill: %s (%d wiki pages)" % (out, pages))
     return 0
+
+
+def _offscreen(cmd):
+    """the command prefix that gives the gui a display nobody has to look at.
+
+    `fcad render` and `fcad animate` draw with FreeCAD's own viewer, which wants
+    a display. on the user's real one it would flash a window per run, and a
+    build host has none, so it runs under a virtual framebuffer either way."""
+    if not shutil.which(XVFB_RUN):
+        raise SystemExit("fcad %s: %s not found on PATH. the renderer draws "
+                         "with the FreeCAD gui under a virtual display; install "
+                         "xvfb." % (cmd, XVFB_RUN))
+    return [XVFB_RUN, "-a"]
+
+
+def _render_env(args):
+    """export the render flags for the in-freecad renderer to read back.
+
+    a lone positional ending .png is where to write, not what to draw: `render
+    --exclude lid out.png` means the assembly."""
+    if args.out is None and args.target.lower().endswith(PNG_EXT):
+        args.target, args.out = config.ASSEMBLY, args.target
+    given = {"TARGET": args.target, "OUT": args.out and os.path.abspath(args.out),
+             "VIEW": args.view, "PARTS": args.parts, "EXCLUDE": args.exclude,
+             "EXPLODE": args.explode, "SECTION": args.section, "SIZE": args.size}
+    return {**OFFSCREEN_ENV,
+            **{"FCAD_RENDER_" + key: str(value)
+               for key, value in given.items() if value is not None}}
 
 
 def _cutlist_env(args):
@@ -435,9 +521,29 @@ def _optimize_env(args):
     return {k: str(v) for k, v in given if v is not None}
 
 
+def _is_number(text):
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _bind_gap(argv):
+    """argv with a bare `--explode` given its default GAP explicitly.
+
+    argparse hands an optional value the next token whatever it is, so
+    `render --explode assembly out.png` took the target for the gap and died
+    converting it to a float. a flag followed by anything but a number is the
+    flag on its own."""
+    return [tok if tok != EXPLODE_FLAG or _is_number("".join(argv[i + 1:i + 2]))
+            else "%s=%g" % (EXPLODE_FLAG, EXPLODE_GAP)
+            for i, tok in enumerate(argv)]
+
+
 def main(argv=None):
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_bind_gap(sys.argv[1:] if argv is None else argv))
     if not args.command or args.command == "help":
         _help(parser, getattr(args, "topic", None))
         return 0
@@ -465,18 +571,23 @@ def main(argv=None):
     if cmd == "pdf":
         return run_entry(cfg, ["pdf"], gui=True)
     if cmd == "render":
-        from fcad.render import render
-        render.render(args.target, args.out, name=cfg.name, dist=cfg.dist)
-        return 0
+        return run_entry(cfg, ["render"], gui=True, wrap=_offscreen(cmd),
+                         env_extra=_render_env(args))
     if cmd == "animate":
         from fcad.render import animate
         # the assembly is the thing worth watching build itself; a single part
         # has nothing to assemble, so it spins instead.
-        subject = args.subject or ("assemble" if args.target in
-                                   ("assembly", cfg.name) else "static")
-        animate.animate(args.target, args.stem, name=cfg.name, dist=cfg.dist,
-                        camera=args.camera, subject=subject, order=args.order,
-                        seconds=args.seconds, fps=args.fps, speed=args.speed)
+        subject = args.subject or ("assemble" if config.is_assembly(
+            cfg.name, args.target) else "static")
+        wrap = _offscreen(cmd)
+        animate.animate(
+            lambda plan: run_entry(cfg, ["animate"], gui=True, wrap=wrap,
+                                   env_extra={**OFFSCREEN_ENV,
+                                              "FCAD_RENDER_PLAN": plan}),
+            args.target, args.stem, name=cfg.name, dist=cfg.dist,
+            camera=args.camera, subject=subject, order=args.order,
+            seconds=args.seconds, fps=args.fps, speed=args.speed,
+            size=args.size)
         return 0
     if cmd == "fem":
         env = {"FCAD_TARGET": args.target}

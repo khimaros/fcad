@@ -19,11 +19,10 @@ everything else here is the geometry vocabulary those tests turn out to need:
 placed solids, their blanks, extents, and the volume two of them share.
 """
 
-import importlib.util
 import os
 import sys
-from importlib.machinery import SourceFileLoader
 
+from fcad import loader
 from fcad.project import normalize
 
 # a face-to-face contact leaves an OCC sliver rather than exactly zero, so a
@@ -33,14 +32,7 @@ TOUCH_VOL = 1.0
 
 def load(path, name="fcad_project_under_test"):
     """import a project module from a path, `.fcad` or `.py` alike."""
-    d = os.path.dirname(os.path.abspath(path))
-    if d and d not in sys.path:
-        sys.path.insert(0, d)
-    loader = SourceFileLoader(name, path)
-    spec = importlib.util.spec_from_loader(name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+    return loader.load_path(path, name)
 
 
 def find(path=None, stem=None):
@@ -126,6 +118,26 @@ def overlap(a, b):
 
 def near(a, b, tol=1e-6):
     return abs(a - b) <= tol
+
+
+def capture_stderr(fn, limit=4_000_000):
+    """run fn with the process's fd 2 captured; (result, what was written).
+
+    FreeCAD's warnings and errors come from the kernel (c++), so a python-level
+    redirect of `sys.stderr` never sees them; the real descriptor has to be
+    swapped. for asserting that a build is quiet, or that it said something."""
+    r, w = os.pipe()
+    old = os.dup(2)
+    os.dup2(w, 2)
+    try:
+        result = fn()
+    finally:
+        os.dup2(old, 2)
+        os.close(old)
+        os.close(w)
+        text = os.read(r, limit).decode(errors="replace")
+        os.close(r)
+    return result, text
 
 
 class Checks:

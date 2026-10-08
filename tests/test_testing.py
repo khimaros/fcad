@@ -46,6 +46,14 @@ def main():
 
     c("both plates are the one part placed twice",
       len(testing.solids(mod, plate)) == 2)
+    # a body's shape is a compound around its one solid, and a compound has no
+    # centre of mass or principal axes - the first thing an axis test asks for.
+    kinds = [s.ShapeType for s in testing.solids(mod, plate)
+             + testing.solids(mod, screw) + testing.blanks(mod, plate)]
+    c("solids() and blanks() hand back solids (%s)" % sorted(set(kinds)),
+      set(kinds) == {"Solid"})
+    c("... so a part's centre of mass can be asked for",
+      hasattr(testing.solids(mod, screw)[0], "CenterOfMass"))
 
     # the lap: two plates thick, and reaching two plate lengths less the overlap.
     box = testing.extent(mod, plate)

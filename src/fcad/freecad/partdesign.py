@@ -1,4 +1,4 @@
-"""the PartDesign plumbing fcad owns, and two helpers it does not insist on.
+"""the PartDesign plumbing fcad owns, and the helpers it does not insist on.
 
 fcad models nothing here. a part's `build(doc, body)` is called with a live
 document and an empty body and makes real FreeCAD calls, so everything FreeCAD
@@ -14,8 +14,8 @@ two different things live here, and it is worth knowing which is which:
   scratch-document dance is fcad's problem, not a project's.
 - **helpers, which a project may ignore.** `add_sketch` constrains a sketch
   fully (which `check` requires, so fcad owes projects a way that is not
-  tedious), and `pad_and_bore` is the `profile2d` + `holes` shorthand's own
-  implementation. call them, or write the Sketcher calls yourself, or crib from
+  tedious), `add_text` is lettering as a profile, and `pad_and_bore` is the
+  `profile2d` + `holes` shorthand's own implementation. call them, or write the Sketcher calls yourself, or crib from
   them - nothing routes through them.
 
 `shape_of` reads the shape back from a real recompute rather than deriving it a
@@ -25,6 +25,8 @@ pays once per part and the bom, cut list and `optimize` never pay at all (they
 read metadata).
 """
 
+import os
+
 import FreeCAD as App
 import Part
 import Sketcher
@@ -32,11 +34,51 @@ import Sketcher
 from fcad import types
 
 V = App.Vector
+# the base class of every feature that produces a solid (Pad, Pocket, Hole,
+# Fillet, ...), as against the datums and binders that share the namespace.
+FEATURE_TYPE = "PartDesign::Feature"
+# the base class of the features that only shape edges and faces of the solid
+# before them: Fillet, Chamfer, Draft, Thickness.
+DRESSUP_TYPE = "PartDesign::DressUp"
+# the observer freecadcmd reports through, and what it reports that a scratch
+# recompute can say nothing useful with.
+TEXT_TYPE = "Part::Part2DObjectPython"
+# a font that is wherever FreeCAD is: TechDraw's own drawing face.
+FONT = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Resources",
+                    "fonts", "osifont-lgpl3fe.ttf")
+CONSOLE = "Console"
+CONSOLE_KINDS = ("Wrn", "Err")
+# a feature changing its part's volume by less than this fraction did nothing.
+INERT_TOL = 1e-9
 
 
-def add_sketch(doc, owner, name, points=(), circles=(), z=0.0, placement=None):
+def _loop(points, first):
+    """(segments, constraints) of one closed polygon, every vertex pinned in x
+    and y. `first` is the sketch index its first segment will have."""
+    n = len(points)
+    segments = [Part.LineSegment(V(points[i][0], points[i][1], 0),
+                                 V(points[(i + 1) % n][0], points[(i + 1) % n][1], 0))
+                for i in range(n)]
+    pins = [Sketcher.Constraint("Coincident", first + i, 2,
+                                first + (i + 1) % n, 1) for i in range(n)]
+    for i in range(n):
+        pins.append(Sketcher.Constraint("DistanceX", first + i, 1,
+                                        float(points[i][0])))
+        pins.append(Sketcher.Constraint("DistanceY", first + i, 1,
+                                        float(points[i][1])))
+    return segments, pins
+
+
+def add_sketch(doc, owner, name, points=(), circles=(), z=0.0, placement=None,
+               loops=()):
     """a fully-constrained sketch: parallel to XY at `z`, or wherever `placement`
-    puts it (an axial profile for a revolution wants XZ).
+    puts it (an axial profile for a revolution wants XZ). `placement` wins when
+    both are given.
+
+    `points` is the outline, `loops` further closed polygons and `circles`
+    `(cx, cy, dia)` triples, all in the sketch's own xy. they combine: a loop or
+    circle inside the outline is a hole in the face a Pad extrudes, so a window,
+    a ring or a frame is one sketch and one feature, with no Pocket to aim.
 
     `owner` is a `PartDesign::Body` for a declared part, or the document itself
     for the outline sketch of a part that hands over its own solid - the only
@@ -46,30 +88,53 @@ def add_sketch(doc, owner, name, points=(), circles=(), z=0.0, placement=None):
     diameter, leaving zero degrees of freedom: `check` fails a part file whose
     sketches are loose, and a sketch nobody constrained is a drawing rather than
     a definition. a project wanting arcs, splines or constraints between elements
-    writes Sketcher calls directly - this covers the common case, not the API."""
+    writes Sketcher calls directly - this covers the common case, not the API.
+
+    the geometry and the constraints each go in as one list. a sketch re-solves
+    on every `addConstraint`, so adding them singly is quadratic in the sketch:
+    forty islands took 35 seconds that way and take a fraction of one this way."""
     make = owner.newObject if hasattr(owner, "newObject") else owner.addObject
     sketch = make(types.Sketcher.SketchObject, name)
     sketch.Placement = placement or App.Placement(V(0, 0, z), App.Rotation())
-    n = len(points)
-    for i in range(n):
-        a = V(points[i][0], points[i][1], 0)
-        b = V(points[(i + 1) % n][0], points[(i + 1) % n][1], 0)
-        sketch.addGeometry(Part.LineSegment(a, b), False)
-    for i in range(n):
-        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % n, 1))
-    for i in range(n):
-        sketch.addConstraint(Sketcher.Constraint("DistanceX", i, 1,
-                                                 float(points[i][0])))
-        sketch.addConstraint(Sketcher.Constraint("DistanceY", i, 1,
-                                                 float(points[i][1])))
+    geometry, pins = [], []
+    for loop in ([points] if len(points) else []) + list(loops):
+        segments, held = _loop(loop, len(geometry))
+        geometry += segments
+        pins += held
     for cx, cy, dia in circles:
-        gi = sketch.addGeometry(Part.Circle(V(cx, cy, 0), V(0, 0, 1), dia / 2.0),
-                                False)
-        sketch.addConstraint(Sketcher.Constraint("DistanceX", gi, 3, float(cx)))
-        sketch.addConstraint(Sketcher.Constraint("DistanceY", gi, 3, float(cy)))
-        sketch.addConstraint(Sketcher.Constraint("Diameter", gi, float(dia)))
+        gi = len(geometry)
+        geometry.append(Part.Circle(V(cx, cy, 0), V(0, 0, 1), dia / 2.0))
+        pins += [Sketcher.Constraint("DistanceX", gi, 3, float(cx)),
+                 Sketcher.Constraint("DistanceY", gi, 3, float(cy)),
+                 Sketcher.Constraint("Diameter", gi, float(dia))]
+    if geometry:
+        sketch.addGeometry(geometry, False)
+        sketch.addConstraint(pins)
     sketch.Visibility = False
     return sketch
+
+
+def add_text(doc, body, name, text, size, font=None, placement=None):
+    """lettering as a profile: a Pocket off it engraves, a Pad raises it.
+
+    a Draft ShapeString in the body, lying in XY from the origin with the
+    baseline along x, or wherever `placement` puts it. `size` is the height of
+    the letters in mm and `font` a .ttf path, defaulting to the single-stroke-
+    weight engineering face FreeCAD ships, so a build does not depend on what
+    the machine has installed. the cut it makes is named after `name`, the way
+    one off a sketch is, which is what `openings` wants.
+
+    it is made here rather than with `Draft.make_shapestring`, which writes
+    into the *active* document: fcad builds a part in scratch documents that
+    are not the active one."""
+    from draftobjects.shapestring import ShapeString
+    obj = body.newObject(TEXT_TYPE, name)
+    ShapeString(obj)
+    obj.String, obj.FontFile, obj.Size = text, font or FONT, size
+    obj.Placement = placement or App.Placement()
+    obj.Visibility = False
+    doc.recompute()
+    return obj
 
 
 def pad_and_bore(doc, body, points, thickness, holes=(), name="part"):
@@ -124,6 +189,32 @@ def features_of(doc):
             and o.TypeId != types.PartDesign.Body]
 
 
+def solid_features(doc):
+    """the features that each leave a solid behind, in tree order.
+
+    datum planes and shape binders live in a body too and are `PartDesign::`
+    types, but they shape nothing."""
+    return [o for o in features_of(doc) if o.isDerivedFrom(FEATURE_TYPE)]
+
+
+def inert_features(doc, tol=INERT_TOL):
+    """features that leave their part exactly as they found it.
+
+    a pocket whose sketch sits on the far face and is not `Reversed` runs away
+    from the material: it succeeds, reports up-to-date, and removes nothing.
+    FreeCAD says nothing, the part still builds, and the hole is simply not
+    there. each feature's `Shape` is the body as it stood after that step, so a
+    feature whose shape matches the one before it did no work - which needs no
+    knowledge of what kind of feature it was."""
+    found, before = [], None
+    for feature in solid_features(doc):
+        after = feature.Shape.Volume
+        if before is not None and abs(after - before) <= tol * max(before, 1.0):
+            found.append(feature)
+        before = after
+    return found
+
+
 def circles_of(doc, names=()):
     """(cx, cy, dia) for every circle in the named sketches, in part coordinates.
 
@@ -156,34 +247,25 @@ def profile_name(feature):
     return getattr(prof, "Name", None)
 
 
-def subtractive(doc, body, tol=1e-6):
-    """the features that take material away, found by taking them away.
+def subtractive(doc, tol=1e-6):
+    """the features that take material away: each one that left less than it found.
 
     FreeCAD does not say. `AddSubType` is not exposed to python, and the class
     hierarchy does not discriminate - Pad, Pocket, Hole and Fillet all derive
-    from `PartDesign::FeatureAddSub`. so ask the geometry instead: suppress a
-    feature, recompute, and see which way the volume moved. that needs no
-    vocabulary at all, which is the point - it is right about a Pocket, a Groove
-    and a dressup Fillet without fcad knowing what any of them are, and stays
-    right about features that do not exist yet.
+    from `PartDesign::FeatureAddSub`. so ask the geometry instead: a feature's
+    `Shape` is the body as it stood after that step, and the volume either went
+    down or it did not. that needs no vocabulary at all, which is the point - it
+    is right about a Pocket, a Groove and a dressup Fillet without fcad knowing
+    what any of them are, and stays right about features that do not exist yet.
 
-    suppressing the base feature of a body changes nothing (there is no earlier
-    shape to fall back to), which reads as "not subtractive" and is the answer
-    we want."""
-    full = body.Shape.Volume
-    found = []
-    for feature in features_of(doc):
-        try:
-            feature.Suppressed = True
-            doc.recompute()
-            if body.Shape.Volume > full + tol:
-                found.append(feature)
-        except Exception:
-            pass
-        finally:
-            feature.Suppressed = False
-            doc.recompute()
-    return found
+    nothing is taken out of the tree to find out. suppressing a feature
+    renumbers the edges of everything after it, so a chamfer further down lost
+    the edges it names and FreeCAD reported an invalid link for every one of
+    them, on every build, about a document nobody will ever open. the base
+    feature has nothing before it to compare with, and is never a cut."""
+    steps = solid_features(doc)
+    return [after for before, after in zip(steps, steps[1:])
+            if after.Shape.Volume < before.Shape.Volume - tol]
 
 
 def _in_scratch(spec, fn):
@@ -203,12 +285,44 @@ def _in_scratch(spec, fn):
             App.setActiveDocument(prior)
 
 
+def _solid(shape):
+    """a body's shape as the solid it is, when it is exactly one.
+
+    some features (a Hole, for one) leave the body's shape as a compound around
+    its single solid, and a compound answers `Volume` and `BoundBox` but has no
+    `CenterOfMass` or principal axes. which kind came back depended on the last
+    feature in the tree, so a test that worked on a turned pin failed on a
+    drilled plate. a part severed into several solids is left as the compound,
+    which is what the disjoint check counts."""
+    solids = shape.Solids
+    return solids[0].copy() if len(solids) == 1 else shape.copy()
+
+
 def shape_of(spec):
     """the shape of a declared part, built in a scratch document."""
-    return _in_scratch(spec, lambda doc, body: body.Shape.copy())
+    return _in_scratch(spec, lambda doc, body: _solid(body.Shape))
 
 
-def blank_of(spec, keep=()):
+def _recompute_quietly(doc):
+    """recompute a scratch document whose cuts were just suppressed, unheard.
+
+    a dress-up names edges, and a suppressed feature before it takes them
+    away: a chamfer on a fillet loses every one, and FreeCAD says so forty
+    lines at a time, on every build, about a document nobody will ever open.
+    the dress-up is suppressed too, so its broken link changes nothing. the
+    tree was already built once unsuppressed, so a real error has been heard."""
+    console = App.Console
+    heard = {kind: console.GetStatus(CONSOLE, kind) for kind in CONSOLE_KINDS}
+    for kind in heard:
+        console.SetStatus(CONSOLE, kind, False)
+    try:
+        doc.recompute()
+    finally:
+        for kind, on in heard.items():
+            console.SetStatus(CONSOLE, kind, on)
+
+
+def blank_of(spec, keep=(), dressed=False):
     """the part before its joinery: every subtractive feature suppressed.
 
     this is what "the blank" means once a part is a feature tree, and it is the
@@ -223,16 +337,37 @@ def blank_of(spec, keep=()):
     left in place. that distinction is not in the geometry: a nut's bore and a
     lap relieved twice as wide as it should be are both a feature that removed
     material, and only the project knows which is meant to stay empty. the void
-    check starts from this shape, so what it measures is the joinery alone."""
+    check starts from this shape, so what it measures is the joinery alone.
+
+    `dressed` keeps the dress-ups too, for the same check: a chamfer or a fillet
+    shapes a part and is never joinery, and here the type does say so. it cannot
+    simply stay in the tree, because it names edges that suppressing an earlier
+    cut renumbers; what it took is cut back out of the blank instead."""
     def build(doc, body):
-        cuts = [f for f in subtractive(doc, body)
+        steps = solid_features(doc)
+        cuts = [f for f in subtractive(doc)
                 if profile_name(f) not in keep]
-        if not cuts:
-            return body.Shape.copy()
+        trims = [before.Shape.cut(after.Shape)
+                 for before, after in zip(steps, steps[1:])
+                 if dressed and after in cuts
+                 and after.isDerivedFrom(DRESSUP_TYPE)]
         for feature in cuts:
             feature.Suppressed = True
-        doc.recompute()
-        return body.Shape.copy()
+        if cuts:
+            _recompute_quietly(doc)
+        blank = body.Shape
+        for trim in trims:
+            blank = blank.cut(trim)
+        return _solid(blank)
+
+    return _in_scratch(spec, build)
+
+
+def stray_openings(spec):
+    """the openings a part declares that are not the sketch of any of its cuts."""
+    def build(doc, body):
+        cuts = {profile_name(f) for f in subtractive(doc)}
+        return [name for name in spec.openings if name not in cuts]
 
     return _in_scratch(spec, build)
 

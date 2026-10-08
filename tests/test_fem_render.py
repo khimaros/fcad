@@ -102,12 +102,12 @@ def _figure_checks(root):
 
     np.savez_compressed(os.path.join(root, "bar.fem.npz"), **data)
     fem_render.render_static("bar", name="bar", dist=root)
-    png = os.path.join(root, "fem_bar.png")
+    png = os.path.join(root, "bar.fem.png")
     return [
         ("the collection is normalized to the clamp", float(norm.vmax) == P99),
         ("a below-horizon viewpoint is honoured", drawn == (-32.0, 10.0)),
-        ("render_static writes its png", os.path.exists(png)
-         and os.path.getsize(png) > 1000),
+        ("render_static writes its png beside the result it draws",
+         os.path.exists(png) and os.path.getsize(png) > 1000),
     ]
 
 
@@ -185,10 +185,11 @@ def _subject_checks(root):
                    disp_mag=np.array([0.0, 1.0, 2.0], np.float32))
     np.savez_compressed(os.path.join(root, "bar.fem.npz"), **data)
     made = {}
-    for subject in ("flex", "static"):
-        stem = os.path.join(root, subject)
+    # the static clip takes the default stem, which sits beside the result.
+    for subject, stem in (("flex", os.path.join(root, "flex")), ("static", None)):
         fem_animate.animate("bar", stem, name="bar", dist=root,
                             camera="orbit", subject=subject)
+        stem = stem or os.path.join(root, "bar.fem")
         made[subject] = os.path.exists(stem + ".mp4") and os.path.exists(stem + ".gif")
     modes_only = None
     try:
@@ -198,7 +199,8 @@ def _subject_checks(root):
         modes_only = str(e)
     return [
         ("subject=flex writes its clip", made["flex"]),
-        ("subject=static writes its clip", made["static"]),
+        ("subject=static writes its clip, by default beside the result",
+         made["static"]),
         ("a subject with nothing to show fails loudly, not silently",
          modes_only is not None and "no clips" in modes_only),
         ("and says how to get the modes it wanted",

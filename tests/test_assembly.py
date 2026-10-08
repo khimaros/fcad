@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import FreeCAD as App
 import Part
 
+from fcad import testing
 from fcad.freecad import build_assembly
 
 V = App.Vector
@@ -45,6 +46,7 @@ class _Project:
     name = "tassembly"
     schema = []
     enum_choices = {}
+    assemble = None           # no hook: fcad fixes everything to the datum
 
 
 def _make_part(parts_dir, name):
@@ -54,25 +56,6 @@ def _make_part(parts_dir, name):
     doc.recompute()
     doc.saveAs(os.path.join(parts_dir, name + ".FCStd"))
     App.closeDocument(doc.Name)
-
-
-def _capture_stderr(fn):
-    """run fn with the C++ fd-2 stream captured, returning (result, stderr_text).
-
-    the noisy `still touched` / `must be a DAG` lines come from the FreeCAD
-    kernel (c++), so a python-level redirect won't see them; dup the real fd."""
-    r, w = os.pipe()
-    old = os.dup(2)
-    os.dup2(w, 2)
-    try:
-        result = fn()
-    finally:
-        os.dup2(old, 2)
-        os.close(old)
-        os.close(w)
-        text = os.read(r, 4_000_000).decode(errors="replace")
-        os.close(r)
-    return result, text
 
 
 def _build(tmp):
@@ -86,7 +69,7 @@ def _build(tmp):
                       App.Placement(V(40, 0, 0), App.Rotation())]),
     ]
     path = os.path.join(tmp, "tassembly.FCStd")
-    _, err = _capture_stderr(
+    _, err = testing.capture_stderr(
         lambda: build_assembly.build_jointed_doc(
             _Project(), {}, {"specs": specs}, parts_dir, path))
     return path, err

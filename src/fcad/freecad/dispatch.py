@@ -48,14 +48,17 @@ def dirs(project):
 
 
 def run(project, target, values=None):
+    """build one target: a token from TARGETS, or a part's name for that part
+    alone, in every format."""
     # don't litter dist/ with .FCBak backups on resave.
     App.ParamGet("User parameter:BaseApp/Preferences/Document").SetInt(
         "CountBackupFiles", 0)
-    part_fmts, asm_fmts = TARGETS[target]
+    part_fmts, asm_fmts = TARGETS.get(target, (ALL, None))
     d = dirs(project)
     values = project.defaults() if values is None else values
     if part_fmts:
-        build_parts.build(project, values, d, part_fmts)
+        build_parts.build(project, values, d, part_fmts,
+                          only=None if target in TARGETS else target)
     if asm_fmts:
         build_assembly.build(project, values, d, asm_fmts)
     print("build ok: target=%s -> %s" % (target, d["dist"]))
@@ -119,7 +122,7 @@ def check(project, values=None):
         failed = True
         print("check failed: %d overlapping part pair(s):" % len(hits))
         for a, b, vol in hits:
-            print("  %s <-> %s : %.1f mm^3" % (a, b, vol))
+            print("  %s <-> %s : %s" % (a, b, build_assembly.fmt_vol(vol)))
     else:
         print("check ok: no overlapping parts")
 
@@ -151,19 +154,38 @@ def check(project, values=None):
               % len(loose_parts))
         for name in loose_parts:
             print("  " + name)
-    else:
+    elif build_assembly.states_ground(model):
         print("check ok: every part is grounded, fastened or resting on another")
+    else:
+        # "ok" here would report a result nobody computed, and a model meant
+        # as a stack that forgot the flag would never find out.
+        print("check skipped: no part is flagged `grounded`, so nothing was "
+              "tested for support")
 
-    voids = build_assembly.find_voids(project, values, model=model)
+    budget = build_assembly.VOID_BUDGET
+    sizes = build_assembly.measure_voids(project, values, model=model)
+    voids = [v for v in sizes if v[2] > budget]
+    stray = build_assembly.find_stray_openings(project, values, model=model)
     if voids:
         failed = True
         print("check failed: %d part(s) cut away more than anything fills:"
               % len(voids))
         for name, vol, frac in voids:
-            print("  %s: %.0f mm^3 unfilled (%.1f%% of the blank)"
-                  % (name, vol, 100.0 * frac))
-    else:
-        print("check ok: no part carries an unfilled void")
+            print("  %s: %.0f mm^3 unfilled (%.1f%% of the blank, %.1f%% allowed)"
+                  % (name, vol, 100.0 * frac, 100.0 * budget))
+    if stray:
+        failed = True
+        print("check failed: %d opening(s) name no cut (an opening is the name "
+              "of the cut's sketch, not of the feature):" % len(stray))
+        for part, name in stray:
+            print("  %s: %s" % (part, name))
+    if not voids and not stray:
+        # the figure a passing model runs at, since the budget is otherwise
+        # only ever met by failing it.
+        worst = max(sizes, key=lambda v: v[2], default=None)
+        print("check ok: no part carries an unfilled void" + (
+            " (most: %s, %.2f%% of its blank against %.1f%% allowed)"
+            % (worst[0], 100.0 * worst[2], 100.0 * budget) if worst else ""))
 
     undrilled = build_assembly.find_undrilled(project, values, model=model)
     if undrilled:
@@ -184,7 +206,12 @@ def check(project, values=None):
         for name, n in split:
             print("  %s: %d disconnected solids" % (name, n))
     else:
-        print("check ok: every part is one connected solid")
+        # a part that is pieces on purpose was not asked, and the line must not
+        # claim otherwise.
+        meant = sorted(s.name for s in model.specs
+                       if getattr(s, "disjoint", False))
+        print("check ok: every part is one connected solid" + (
+            ", or flagged `disjoint` (%s)" % ", ".join(meant) if meant else ""))
 
     asm = os.path.join(project.dist, project.name + ".FCStd")
     if not os.path.exists(asm):
@@ -211,6 +238,15 @@ def check(project, values=None):
                 print("  " + name)
         else:
             print("check ok: every part sketch is fully constrained")
+        inert = build_parts.find_inert_features(parts_dir)
+        if inert:
+            failed = True
+            print("check failed: %d feature(s) change nothing (a cut run the "
+                  "wrong way? flip `Reversed`):" % len(inert))
+            for name in inert:
+                print("  " + name)
+        else:
+            print("check ok: every feature changes its part")
 
     if failed:
         sys.exit(1)

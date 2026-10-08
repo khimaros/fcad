@@ -39,6 +39,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+from fcad import config
 from fcad.render import FEM_SECONDS, render, fem_render
 
 SECONDS = float(os.environ.get("FCAD_SECONDS", FEM_SECONDS))
@@ -92,7 +93,7 @@ def animate(target="assembly", stem=None, name=None, dist=None,
     clip = lambda *a, **kw: _clip(*a, frames=frames, fps=fps, **kw)
     data = np.load(fem_render.npz_path(target, name, dist))
     nodes, tris = data["nodes"], data["tris"]
-    stem = stem or os.path.join(dist, "fem_%s" % target)
+    stem = stem or config.artifact_stem(dist, name, target, config.FEM)
     written = []
 
     # the deformation clip, colored by von Mises. the colour scale is clamped off
@@ -120,7 +121,7 @@ def animate(target="assembly", stem=None, name=None, dist=None,
             written.append(clip(nodes, tris, mag, md, amp,
                                 "%s  mode %d: %.1f Hz" %
                                 (target, k + 1, float(data["mode_freqs"][k])),
-                                "%s_mode%d" % (stem, k + 1), "mode disp (mm)",
+                                "%s.mode%d" % (stem, k + 1), "mode disp (mm)",
                                 camera=camera))
 
     if not written:

@@ -44,6 +44,38 @@ def parts_path(dist, name):
     return os.path.join(dist, name + PARTS_SUFFIX)
 
 
+ASSEMBLY = "assembly"         # the target that is the whole model
+PARTS_DIR = "parts"
+DOC_EXT = ".FCStd"
+# what is made *from* a target, beyond the exports of it.
+ASSEMBLE, SPIN, FEM, DIFF = "assemble", "spin", "fem", "diff"
+
+
+def is_assembly(name, target):
+    """the whole model is asked for as `assembly` or by the project's name."""
+    return target in (ASSEMBLY, name)
+
+
+def artifact_stem(dist, name, target, *kind):
+    """the path of something made from a target, less its extension.
+
+    it goes beside the target's own files and is named after them: the
+    assembly's next to `<name>.FCStd`, a part's next to `parts/<part>.FCStd`.
+    so a render is `<name>.png`, one more export of the model, and a part's
+    stress plot is `parts/<part>.fem.png`. `kind` is whatever tells two outputs
+    of one target apart: a camera, `fem`, `spin`."""
+    own = (os.path.join(dist, name) if is_assembly(name, target)
+           else os.path.join(dist, PARTS_DIR, target))
+    return ".".join((own,) + kind)
+
+
+def is_part_doc(filename):
+    """a part's own document, as against one made from it (`post.fem.FCStd`),
+    which shares its directory and is not a part to check or to open."""
+    return (filename.endswith(DOC_EXT)
+            and "." not in filename[:-len(DOC_EXT)])
+
+
 @dataclass
 class Config:
     project: str      # project root dir (holds dist/)

@@ -18,6 +18,7 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+from fcad import config
 from fcad.render import render
 
 CMAP = "viridis"
@@ -29,7 +30,7 @@ CLAMP_KEY = "von_mises_p99"
 
 
 def npz_path(target, name, dist):
-    return os.path.join(dist, target + ".fem.npz")
+    return config.artifact_stem(dist, name, target, config.FEM) + ".npz"
 
 
 def deform_scale(data, frac=DEFORM_FRAC):
@@ -90,7 +91,7 @@ def render_static(target="assembly", out=None, name=None, dist=None):
                           disp=data["disp"], scale=scale, vmax=vmax)
     render.aim(ax)
     ax.set_title("%s  von Mises %s  (deform x%.0f)" % (target, note, scale))
-    out = out or os.path.join(dist, "fem_%s.png" % target)
+    out = out or config.artifact_stem(dist, name, target, config.FEM) + ".png"
     fig.savefig(out, dpi=110, bbox_inches="tight")
     print("rendered fem %s -> %s" % (target, out))
 

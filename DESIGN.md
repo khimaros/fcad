@@ -7,7 +7,7 @@ FreeCAD ships its own bundled python and runs as either a headless console
 work must run inside that bundled interpreter (anything importing `FreeCAD`,
 `Part`, `TechDraw`, the Assembly workbench), some needs the gui specifically
 (TechDraw pdf/svg export, the interactive 3d diff, opening documents view-ready),
-and some is plain python with ordinary pip dependencies (the matplotlib renderer).
+and some is plain python with ordinary pip dependencies (the matplotlib fem pictures).
 
 so fcad is **one package and one cli over three interpreters**, with the cli
 picking the right one per command so the user never has to.
@@ -18,7 +18,9 @@ picking the right one per command so the user never has to.
 src/fcad/
   cli.py          the unified argparse cli; the `fcad` console script
   config.py       resolve project/name/dist + freecad binaries (stdlib only);
-                  the project path is a dir (project.py) or a single .fcad file
+                  the project path is a dir (project.py) or a single .fcad file.
+                  also names what lands in dist/ (`artifact_stem`), since both
+                  sides of the process boundary write there
   project.py      the Project descriptor + the ready-made `Part` spec; infers
                   the varset schema/enum choices from PARAMS when not given
   loader.py       load a project (a dir's project.py or a .fcad file) and return
@@ -36,16 +38,21 @@ src/fcad/
     dispatch.py   build/validate targets -> part/assembly builders
     build_parts.py  build_assembly.py  util.py
     view.py  view_parts.py  export_pdf.py  diff_doc.py
+    render_view.py  the renderer: the gui's own viewer, under xvfb-run. draws
+                    a still, or every frame of a clip animate.py planned
     api_docs.py   introspect the installed FreeCAD -> a markdown api reference
     fem.py        headless mesh (gmsh) + solve (CalculiX) -> numpy result bundle
     run_test.py   run one project test here, so it inherits the bootstrap above
     partdesign.py the body/document plumbing, plus optional sketch helpers
-  render/         plain-python, numpy/matplotlib (the [render] extra)
+  render/         plain-python, numpy/matplotlib (the [render] extra): the
+                  animation planner and the fem pictures. render.py is what
+                  they share
     render.py  animate.py  fem_render.py  fem_animate.py
   resources/macros/rebuild.FCMacro
   resources/templates/fcad_A4_landscape.svg
   resources/skills/                   both installed by `install-skill`:
-    fcad/SKILL.md                     fcad's own contract; ships complete
+    fcad/SKILL.md                     fcad's own contract; ships complete, with
+                                      README, CONTRIBUTING and examples/ beside it
     freecad-python/SKILL.md           the FreeCAD api beneath it
     freecad-python/wiki/              52 curated wiki pages (CC0) + NOTICE.md
 ```
@@ -67,9 +74,19 @@ the project/name/dist/binaries once, exports them into the environment, then:
   reaps all of them - killing freecadcmd alone leaves a gmsh behind still holding
   gigabytes. the cost of that session is the terminal's ctrl-c, which no longer
   reaches a child outside the foreground group, so `_run.supervise` relays it.
-- **render / animate / fem-render / fem-animate**: imported and called in-process
-  under the cli's own python (these are the commands with pip dependencies and no
-  FreeCAD need).
+  a headless child's stdout is filtered by `_run.relay`: the entry prints a
+  marker (handed over in `FCAD_BEGIN`) after flushing C stdio, everything ahead
+  of it is FreeCAD's startup and is dropped, and known kernel chatter after it
+  is dropped by pattern. no marker means FreeCAD never reached the entry, and
+  the held output is shown.
+- **fem-render / fem-animate**: imported and called in-process under the cli's
+  own python (these are the commands with pip dependencies and no FreeCAD need).
+- **animate**: both. `render/animate.py` plans the clip in-process - the arrival
+  order from the part STLs, then per frame the camera and how far out each
+  instance still is - and writes that as json. `render_view.film` draws the
+  frames from it in the gui under `xvfb-run`, as `render` draws a still, and
+  ffmpeg encodes them. the sequencing stays plain python and testable without a
+  display; the look is the viewer's, shared with the stills.
 - **test**: one `_entry.py test <file>` per project test, rather than handing the
   file to freecadcmd directly. it looks like an indirection and is not: FreeCAD's
   embedded interpreter ignores PYTHONPATH, so a test run directly cannot
