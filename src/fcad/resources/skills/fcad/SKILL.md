@@ -115,7 +115,7 @@ so `PARAMS` + `def compute` is idiomatic. an explicit
 fcad.PartSpec(name, placements, build=None, solid=None, profile="", length=None,
               grounded=False, embeds=False, dimension_sketches=(),
               dimension_circles=(), openings=(), profile2d=None,
-              color=None, transparency=0, disjoint=False)
+              color=None, transparency=0, disjoint=False, rides=None)
 ```
 
 **the look, for `fcad render`:** `color` is an `(r, g, b)` of 0..1 floats and
@@ -123,6 +123,12 @@ fcad.PartSpec(name, placements, build=None, solid=None, profile="", length=None,
 one material a colour, and anything meant to be seen through (a crystal, a lens,
 a window) a transparency around 80 - without them the render is one grey lump
 and whatever sits under glass is invisible.
+
+**what stays together, for `fcad render --explode`:** every part is a layer of
+its own unless it says `rides="<part>"`, which keeps it on that part. use it
+when one physical piece is several parts only so they can differ in colour or
+material: the components on a board, an insert pressed into a base. a cover or
+tray needs nothing: it is ranked by its closed end.
 
 **geometry - exactly one of these:**
 
@@ -559,7 +565,7 @@ sketches/<name>.{svg,dxf}    defining sketches, parts only. a declared part's ow
 <name>-bom.csv          part,qty,profile,length_mm
 <name>-cutlist.csv      profile,pattern,stock_mm,boards,cut_mm,per_board,offcut_mm
 <name>-placements.json  per-instance placements, for the 3d diff
-<name>-parts.json       per-part grounded/embeds and look, for animate and render
+<name>-parts.json       per-part grounded/embeds/rides and look, for animate and render
 <name>[.<view>][.section-<axis>][.explode].png   the render
 <name>.assemble.{mp4,gif}   <name>.spin.{mp4,gif}
 <name>.fem.{FCStd,npz,png,mp4,gif}   <name>.fem.mode<K>.{mp4,gif}

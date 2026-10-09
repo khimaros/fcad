@@ -202,16 +202,24 @@ def export_placements(placements, path):
 
 
 def export_parts(specs, path):
-    """write {part name: {grounded, embeds, color, transparency}} as json.
+    """write {part name: {grounded, embeds, rides, color, transparency}} as json.
 
     what a renderer cannot recover from geometry: which part anchors the model,
-    which parts are fasteners rather than structure, and what each looks like.
+    which parts are fasteners rather than structure, which part one stays on
+    when the model comes apart, and what each looks like.
     the assembly animator needs the first two to arrive in a sensible order -
     build outward from the anchor, drive the screws last - and the renderer the
     look. both run outside the build, with no access to the project that
     declared them."""
+    names = {spec.name for spec in specs}
+    lost = ["%s rides %s" % (spec.name, spec.rides) for spec in specs
+            if getattr(spec, "rides", None) not in names | {None}]
+    if lost:
+        raise SystemExit("fcad build: `rides` names a part that does not exist "
+                         "(%s). parts: %s" % ("; ".join(lost), ", ".join(sorted(names))))
     data = {spec.name: {"grounded": bool(getattr(spec, "grounded", False)),
                         "embeds": bool(getattr(spec, "embeds", False)),
+                        "rides": getattr(spec, "rides", None),
                         "color": getattr(spec, "color", None),
                         "transparency": getattr(spec, "transparency", 0)}
             for spec in specs}

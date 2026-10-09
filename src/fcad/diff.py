@@ -75,33 +75,37 @@ def _compute(cfg, new, old, target, out, name, docs=False):
         sys.exit("diff: could not compute the 3d diff (no %s written)" % out)
 
 
-def _head_env(cfg, tmp):
+def _head_env(cfg, head):
     """point the HEAD child at the worktree's own copy of the design.
 
     every FCAD_* var is already in the child's environment as an absolute path
     into the working tree, so pointing FCAD_PROJECT at the worktree is not
     enough: a `.fcad` project is named by FCAD_ENTRY, and left alone the HEAD
     build would load the working tree's design and diff it against itself."""
-    entry = (os.path.join(tmp, os.path.relpath(cfg.entry, cfg.project))
+    entry = (os.path.join(head, os.path.relpath(cfg.entry, cfg.project))
              if cfg.entry else "")
-    return {"FCAD_PROJECT": tmp, "FCAD_ENTRY": entry,
-            "FCAD_DIST": os.path.join(tmp, "dist")}
+    return {"FCAD_PROJECT": head, "FCAD_ENTRY": entry,
+            "FCAD_DIST": os.path.join(head, "dist")}
 
 
 def build(cfg, target="assembly"):
     """compute the diff vs HEAD headless and save it as baked solids."""
     root = cfg.project
+    config.require_project(cfg)
     _require_git(root)
     tmp = tempfile.mkdtemp()
+    # a worktree checks out the whole repo, so a project kept in a subdirectory
+    # sits the same distance below the worktree's root.
+    head = os.path.join(tmp, _git(root, "rev-parse", "--show-prefix").stdout.strip())
     try:
         if _git(root, "worktree", "add", "--detach", "--quiet", tmp, "HEAD").returncode:
             sys.exit("diff: could not create the HEAD worktree")
         print("building HEAD geometry...")
-        head = run_entry(cfg, ["step"], env_extra=_head_env(cfg, tmp))
-        if head:
-            sys.exit("diff: HEAD build failed (rc=%d)" % head)
+        rc = run_entry(cfg, ["step"], env_extra=_head_env(cfg, head))
+        if rc:
+            sys.exit("diff: HEAD build failed (rc=%d)" % rc)
         out = _diff_path(cfg, target)
-        _compute(cfg, cfg.dist, os.path.join(tmp, "dist"), target, out, cfg.name)
+        _compute(cfg, cfg.dist, os.path.join(head, "dist"), target, out, cfg.name)
         print("open it with: fcad diff-open %s" % target)
         return 0
     finally:
@@ -215,8 +219,8 @@ def _add_attr(path, line):
 
 
 def install_git(cfg):
-    """teach this repo to show a `.fcad` file as the 3d diff, and forges to
-    render it as the python it is.
+    """teach this repo to show a built `.FCStd` as the 3d diff, and forges to
+    render a `.fcad` file as the python it is.
 
     the two attributes have to live in different files, and which goes where is
     forced. git will not run a command that a tracked file names - a clone would
@@ -241,6 +245,7 @@ def install_git(cfg):
     print("diff.%s.command = %s" % (GIT_DRIVER, command))
     print("%s: %s" % (local, GIT_ATTR))
     print("%s: %s" % (tracked, GIT_LINGUIST))
-    print("`git diff` on a .fcad file now opens the 3d diff")
+    print("`git diff` on a built .FCStd now opens the 3d diff; a .fcad file keeps "
+          "its text diff (see `fcad diff`)")
     print("commit .gitattributes so forges render .fcad as python")
     return 0

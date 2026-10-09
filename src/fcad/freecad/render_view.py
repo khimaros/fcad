@@ -40,6 +40,10 @@ PUMPS = 30                   # event-loop turns the scene needs before a capture
 # how far a section's cutting block reaches past the model, as a multiple of its
 # diagonal: anything over 1 clears it at every orientation.
 CUT_REACH = 2.0
+# a housing's closed end: the share of its height sampled at each end, and how
+# much more material one end must have than the other to be the closed one.
+END_SLAB = 0.05
+CLOSED_RATIO = 1.5
 
 
 def orbit(yaw, tilt):
@@ -123,20 +127,64 @@ def _host(shape, items, flags):
     return min(holders)[1] if holders else None
 
 
+def _carrier(part, flags, drawn):
+    """the part `part` travels on: the end of its `rides` chain, as far as that
+    chain stays among the structural parts drawn. a fastener is no carrier: it
+    may have no layer of its own."""
+    seen = {part}
+    while True:
+        host = flags.get(part, {}).get("rides")
+        if (host not in drawn or host in seen
+                or flags.get(host, {}).get("embeds")):
+            return part
+        seen.add(host)
+        part = host
+
+
 def _layers(items, flags):
     """{instance index: the part whose layer it travels in} for an explosion.
 
-    a part is its own layer, with one exception. a fastener lying across the
-    stack (a cross pin, a spring bar, a side button) has no layer of its own to
-    go to: it belongs to the part it passes through and travels with it."""
+    a part is its own layer, with two exceptions. one the project declares
+    `rides` another stays on it. and a fastener lying across the stack (a cross
+    pin, a spring bar, a side button) has no layer of its own to go to: it
+    belongs to the part it passes through and travels with it."""
+    drawn = {part for part, _ in items}
     out = {}
     for i, (part, shape) in enumerate(items):
         box = shape.BoundBox
         across = box.ZLength < max(box.XLength, box.YLength)
         host = (_host(shape, items, flags)
                 if across and flags.get(part, {}).get("embeds") else None)
-        out[i] = host or part
+        out[i] = _carrier(host or part, flags, drawn)
     return out
+
+
+def _end_volume(shape, top):
+    """how much of a part lies in the END_SLAB of its height at one end."""
+    box = shape.BoundBox
+    depth = END_SLAB * box.ZLength
+    slab = Part.makeBox(box.XLength, box.YLength, depth, V(
+        box.XMin, box.YMin, box.ZMax - depth if top else box.ZMin))
+    return shape.common(slab).Volume
+
+
+def _seat(part, shape, items, flags):
+    """the height a structural part is ranked at in an explosion.
+
+    its bounding box centre, unless it is a housing: a part around another
+    part's centre and closed at one end. a deep cover's centre sits below what
+    it covers and a tray's above what it holds, so each is ranked by its closed
+    end, which is the side it comes off from. a sleeve, open at both ends,
+    keeps its centre."""
+    box = shape.BoundBox
+    holds = any(other != part and not flags.get(other, {}).get("embeds")
+                and box.isInside(inner.BoundBox.Center) for other, inner in items)
+    if not holds:
+        return box.Center.z
+    top, bottom = _end_volume(shape, True), _end_volume(shape, False)
+    if top > CLOSED_RATIO * bottom:
+        return box.ZMax
+    return box.ZMin if bottom > CLOSED_RATIO * top else box.Center.z
 
 
 def exploded(items, flags, factor):
@@ -150,15 +198,16 @@ def exploded(items, flags, factor):
     mid = _bbox(items).Center.z
     layer = _layers(items, flags)
 
-    def key(part, box):
+    def key(part, shape):
+        box = shape.BoundBox
         if not flags.get(part, {}).get("embeds"):
-            return box.Center.z
+            return _seat(part, shape, items, flags)
         return box.ZMin if box.Center.z < mid else box.ZMax
 
     heights = {}
     for i, (part, shape) in enumerate(items):
         if layer[i] == part:
-            heights.setdefault(part, []).append(key(part, shape.BoundBox))
+            heights.setdefault(part, []).append(key(part, shape))
     order = sorted(heights, key=lambda p: sum(heights[p]) / len(heights[p]))
     gap = factor * max(shape.BoundBox.ZLength for _, shape in items)
     out = []

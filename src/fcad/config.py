@@ -13,6 +13,7 @@ either way the project *root* (where `dist/` is created) is the directory; for a
 """
 
 import os
+import sys
 from dataclasses import dataclass
 
 ENV_PROJECT = "FCAD_PROJECT"
@@ -21,6 +22,10 @@ ENV_NAME = "FCAD_NAME"
 ENV_DIST = "FCAD_DIST"
 ENV_FREECAD = "FREECAD"
 ENV_FREECAD_GUI = "FREECAD_GUI"
+
+# the two files a project can be: a directory's module, or one standalone file.
+PROJECT_PY = "project.py"
+ENTRY_EXT = ".fcad"
 
 DEFAULT_FREECAD = "freecadcmd"
 DEFAULT_FREECAD_GUI = "freecad"
@@ -100,9 +105,9 @@ def _discover_entry(path):
     if os.path.isfile(path):
         return path
     if os.path.isdir(path):
-        if os.path.exists(os.path.join(path, "project.py")):
+        if os.path.exists(os.path.join(path, PROJECT_PY)):
             return ""
-        hits = sorted(f for f in os.listdir(path) if f.endswith(".fcad"))
+        hits = sorted(f for f in os.listdir(path) if f.endswith(ENTRY_EXT))
         if len(hits) == 1:
             return os.path.join(path, hits[0])
     return ""
@@ -125,6 +130,17 @@ def resolve(project=None, name=None, dist=None, freecad=None, freecad_gui=None):
     freecad = freecad or os.environ.get(ENV_FREECAD) or DEFAULT_FREECAD
     freecad_gui = freecad_gui or os.environ.get(ENV_FREECAD_GUI) or DEFAULT_FREECAD_GUI
     return Config(root, entry, name, dist, freecad, freecad_gui)
+
+
+def require_project(cfg):
+    """exit with a sentence when `cfg` names no project at all.
+
+    the usual cause is running fcad from the wrong directory, and left to python
+    that surfaced as an import traceback from deep inside freecadcmd."""
+    if not cfg.entry and not os.path.exists(os.path.join(cfg.project, PROJECT_PY)):
+        sys.exit("no project in %s: it holds neither a %s nor a single %s file "
+                 "(name one with --project PATH)"
+                 % (cfg.project, PROJECT_PY, ENTRY_EXT))
 
 
 def from_env():

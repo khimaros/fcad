@@ -138,8 +138,10 @@ list below), and `from_spec`/`profile` (if your specs aren't `fcad.PartSpec`).
 
 `fcad.PartSpec(name, placements, build=..., solid=..., profile=..., length=...,
 grounded=..., embeds=..., dimension_sketches=..., dimension_circles=...,
-openings=..., profile2d=..., color=..., transparency=...)` is the ready-made
-spec (the last two are how `fcad render` draws the part). exactly one of `build`
+openings=..., profile2d=..., color=..., transparency=..., rides=...)` is the
+ready-made spec (`color` and `transparency` are how `fcad render` draws the
+part; `rides="board"` keeps it on that part under `--explode`, for a chip on its
+board or an insert in its boss). exactly one of `build`
 (your own FreeCAD code, the path to take) or `solid` (a thunk, for geometry that
 is not a body at all) describes the part; `profile` is the bom label, `length`
 the bom length -- **state it on any model you sweep**, or every `optimize`
@@ -177,7 +179,8 @@ sane defaults: `--project` (`FCAD_PROJECT`, a dir or a `.fcad` file, default the
 current dir), `--name` (`FCAD_NAME`, default the dir basename or the `.fcad`
 stem), `--dist` (`FCAD_DIST`, default `<root>/dist`), and `--freecad`/
 `--freecad-gui` (`FREECAD`/`FREECAD_GUI`). run from the project directory and the
-defaults usually need no overrides.
+defaults usually need no overrides. from elsewhere, a `.fcad` path where a
+command takes a TARGET names the project: `fcad diff case/case.fcad`.
 
 ```
 fcad build [TARGET ...]   build/export into dist/ (no target = all); TARGET:
@@ -212,7 +215,7 @@ fcad clean                remove dist/
 fcad info                 print the resolved configuration
 fcad api-docs [DIR]       freecad api reference for the installed build
 fcad install-macro        install the rebuild macro into FreeCAD's macro dir
-fcad install-git          make `git diff` on a .fcad file open the 3d diff
+fcad install-git          make `git diff` on a built .FCStd open the 3d diff
 fcad install-skill        install/refresh the freecad-python agent skill
 fcad help [COMMAND]       show usage (top-level, or for one command)
 ```
@@ -644,6 +647,12 @@ ahead of it landing. the ones that can stop a working project say so.
   something" assertion only applies to a model that flags a part `grounded`,
   and used to print `check ok` either way. it still passes; it no longer claims
   a result. `partdesign.subtractive` takes `(doc)`, no longer `(doc, body)`.
+
+- **`render --explode` orders an enclosure the way it comes apart.** layers
+  were ranked by bounding box centre, which put a deep cover under the parts it
+  covers. a part around others and closed at one end is now ranked by that end.
+  `PartSpec(rides="board")` keeps a part on another instead of giving it a layer
+  of its own; rebuild for it to take effect, since the build records it.
 
 - **`PartSpec(disjoint=True)`: a part that is several pieces on purpose.**
   `check` reports a part in more than one solid as severed by its own joinery,

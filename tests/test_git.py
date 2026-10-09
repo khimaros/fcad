@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import FreeCAD as App
 
-from fcad import config, diff
+from fcad import cli, config, diff
 from fcad._run import run_entry
 
 # a whole single-file project: one box part, `qty` instances in a row. the diff
@@ -52,6 +52,8 @@ def compute(p):
     return [fcad.PartSpec("bar", solid=lambda: box, placements=places)]
 '''
 NAME = "widget"
+# where the project sits inside its repo when it is not the repo root.
+NESTED = "case"
 WIDTH, THICK, PITCH = 40.0, 20.0, 60.0
 V1 = dict(length=100.0, qty=3)
 V2 = dict(length=120.0, qty=5)
@@ -70,13 +72,14 @@ def _git(root, *args):
     return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
 
 
-def _repo(root):
-    """a git repo holding one committed revision of the project."""
+def _repo(root, project=None):
+    """a git repo holding one committed revision of the project, which lives at
+    its root unless `project` names a directory below it."""
     os.makedirs(root, exist_ok=True)
     _git(root, "init", "--quiet")
     _git(root, "config", "user.email", "test@example.com")
     _git(root, "config", "user.name", "test")
-    _write(os.path.join(root, NAME + ".fcad"), V1)
+    _write(os.path.join(project or root, NAME + ".fcad"), V1)
     _git(root, "add", "-A")
     _git(root, "commit", "--quiet", "-m", "baseline")
     return root
@@ -259,10 +262,59 @@ def _diff_build(checks, root, work):
     return new_part
 
 
+def _exit(argv):
+    """run the cli in-process; what it exited with (falsy on success)."""
+    try:
+        return cli.main(argv)
+    except SystemExit as exc:
+        return exc.code
+
+
+def _nested(checks, top):
+    """`fcad diff` on a project kept in a subdirectory of its repo.
+
+    the HEAD worktree is a checkout of the whole repo, so the project sits below
+    its root by the same prefix it has in the working tree."""
+    root = os.path.join(top, NESTED)
+    os.makedirs(root)
+    _repo(top, root)
+    _write(os.path.join(root, NAME + ".fcad"), V2)
+    cfg = _cfg(root)
+    out = diff._diff_path(cfg, "assembly")
+    run_entry(cfg, ["step"])
+    # run from the repo root, the way `fcad diff case/widget.fcad` is typed: the
+    # project is named by path where a TARGET goes, with no --project flag.
+    keep = os.getcwd()
+    os.chdir(top)
+    try:
+        why = _exit(["diff-build"])
+        checks.append(("diff: no project here is said plainly (%s)" % why,
+                       "no project" in str(why)))
+        why = _exit(["diff-build", os.path.join(NESTED, NAME + ".fcad")])
+    finally:
+        os.chdir(keep)
+    if why or not os.path.exists(out):
+        checks.append(("diff nested: built (%s)" % why, False))
+        return
+    added, removed, grey = _layers(out, "assembly")
+    # 3 kept bars grow a slab each, and 2 whole grown bars arrive.
+    want = 3 * SLAB + 2 * (BAR_V1 + SLAB)
+    checks += [
+        ("diff nested: added = the slabs + the new bars (%.0f vs %.0f)"
+         % (added, want), abs(added - want) < TOL),
+        ("diff nested: nothing removed (%.0f)" % removed, abs(removed) < TOL),
+        ("diff nested: the 3 original bars survive (%.0f vs %.0f)"
+         % (grey, 3 * BAR_V1), abs(grey - 3 * BAR_V1) < TOL),
+        ("diff nested: the HEAD worktree is gone again",
+         len(_git(top, "worktree", "list").stdout.splitlines()) == 1),
+    ]
+
+
 def main():
     checks = []
     tmp = tempfile.mkdtemp()
     try:
+        _nested(checks, os.path.join(tmp, "nested"))
         root = _repo(os.path.join(tmp, "repo"))
         work = os.path.join(tmp, "work")
         os.makedirs(work)

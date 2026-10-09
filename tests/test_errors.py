@@ -229,6 +229,24 @@ def _quiet_checks():
     ]
 
 
+def _no_project_checks():
+    """a directory that holds no project is a mistake in how fcad was called, so
+    it gets a sentence saying so rather than python's import traceback."""
+    empty = tempfile.mkdtemp()
+    try:
+        cfg = config.resolve(project=empty)
+        r = subprocess.run([cfg.freecad, entry_path(), "check"],
+                           env={**os.environ, **cfg.env()},
+                           capture_output=True, text=True)
+    finally:
+        shutil.rmtree(empty, ignore_errors=True)
+    out = r.stdout + r.stderr
+    return [("no project: exits non-zero (%d)" % r.returncode, r.returncode != 0),
+            ("no project: says so, naming the directory",
+             "no project" in out and empty in out),
+            ("no project: no traceback", "Traceback" not in out)]
+
+
 def _begin_checks(root):
     """the marker `relay` waits for has to arrive after FreeCAD's own startup.
 
@@ -252,7 +270,7 @@ def main():
     try:
         checks = (_check_checks(root) + _fem_checks(root) + _quiet_checks()
                   + _begin_checks(root) + _crash_checks(root)
-                  + _interleave_checks(root))
+                  + _interleave_checks(root) + _no_project_checks())
     finally:
         shutil.rmtree(root, ignore_errors=True)
     failed = [name for name, ok in checks if not ok]

@@ -233,7 +233,7 @@ def _build_parser():
     m.add_argument("--dir", metavar="DIR", dest="macro_dir",
                    help="macro directory (default ~/.local/share/FreeCAD/Macro)")
     sub.add_parser("install-git",
-                   help="make `git diff` on a .fcad file open the 3d diff")
+                   help="make `git diff` on a built .FCStd open the 3d diff")
     sk = sub.add_parser("install-skill",
                         help="install/refresh the freecad-python agent skill")
     sk.add_argument("--dir", metavar="DIR", dest="skill_dir",
@@ -541,12 +541,31 @@ def _bind_gap(argv):
             for i, tok in enumerate(argv)]
 
 
+def _path_as_project(args):
+    """take a `.fcad` file given where a TARGET goes as the project.
+
+    `fcad diff case/case.fcad` is how every other tool is told which file to work
+    on, and no target can end in `.fcad`, so the path is never ambiguous. an
+    explicit --project still wins."""
+    target = getattr(args, "target", None) or ""
+    paths = [t for t in [target, *getattr(args, "targets", [])]
+             if t.endswith(config.ENTRY_EXT)]
+    if not paths:
+        return
+    args.project = args.project or paths[0]
+    if target in paths:
+        args.target = config.ASSEMBLY
+    if hasattr(args, "targets"):
+        args.targets = [t for t in args.targets if t not in paths]
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(_bind_gap(sys.argv[1:] if argv is None else argv))
     if not args.command or args.command == "help":
         _help(parser, getattr(args, "topic", None))
         return 0
+    _path_as_project(args)
     cfg = config.resolve(args.project, args.name, args.dist,
                          args.freecad, args.freecad_gui)
     cmd = args.command

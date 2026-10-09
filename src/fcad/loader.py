@@ -77,6 +77,7 @@ def load_path(path, name="fcad_project"):
 
 def load_project():
     cfg = config.from_env()
+    config.require_project(cfg)
     if cfg.entry:
         mod = load_path(cfg.entry)
     else:

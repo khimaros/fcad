@@ -30,7 +30,10 @@ never regress on them.
 - R1.2 the project location is resolved from (in order) the `--project` flag, the
   `FCAD_PROJECT` env var, then the current directory; it may name a directory or a
   `.fcad` file, and a directory holding a sole `.fcad` (and no `project.py`) is
-  treated as that file. the project *root* (where `dist/` is created) is the
+  treated as that file. a `.fcad` path given where a command takes a TARGET names
+  the project too (`fcad diff case/case.fcad`), an explicit `--project` winning.
+  a location holding no project fails with a sentence naming it, never a
+  traceback. the project *root* (where `dist/` is created) is the
   directory, or the file's parent for a `.fcad`. the output stem (`--name`/
   `FCAD_NAME`) defaults to the directory basename, or the `.fcad` file's stem; the
   output dir (`--dist`/`FCAD_DIST`) defaults to `<root>/dist`.
@@ -193,6 +196,12 @@ never regress on them.
   render's default name carries the view, section and explosion asked for, so
   one variant does not overwrite another. a document made from a part
   (`<stem>.fem.FCStd`) is not itself checked or opened as a part.
+- R4.2.2 `--explode` orders its layers by how the model comes apart. a part
+  around other parts and closed at one end (a deep cover, a tray) is ranked by
+  that closed end, so a cover lands above what it covers and a tray below what
+  it holds, wherever their bounding box centres fall. a part whose spec says
+  `rides=<part>` stays on that part instead of taking a layer of its own; the
+  build records it in `<name>-parts.json` and fails on a name that is no part.
 - R4.3 `animate [TARGET]` writes an MP4 + GIF of a built model, over a camera
   axis and a subject axis. its frames are drawn by the viewer `render` uses
   (R4.2), offscreen, so a clip has a still's look: each part in the `color` and
@@ -230,7 +239,8 @@ never regress on them.
 - R4.4 the 3d geometry diff of the working tree vs git HEAD (green added / red
   removed / grey unchanged) builds the HEAD geometry in a throwaway git worktree,
   from that worktree's own copy of the design (never the working tree's, whether
-  the project is a directory or a `.fcad` file). because the booleans are the slow
+  the project is a directory or a `.fcad` file, at the repo root or in a
+  subdirectory of it). because the booleans are the slow
   part it is split: `diff-build [TARGET]` bakes the result to
   `<stem>.diff.FCStd` (R4.2.1) headless, `diff-open [TARGET]` opens that instantly in
   the gui, and `diff [TARGET]` chains the two. the diff is computed **per part**:

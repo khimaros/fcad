@@ -9,7 +9,8 @@ each is asserted on the pixels of a real render rather than on the flags:
 - a part is drawn in the colour its `PartSpec` declares;
 - a see-through part shows what is under it;
 - `--parts` / `--exclude` decide what is drawn at all;
-- `--section` opens the model up, and `--explode` moves the parts apart;
+- `--section` opens the model up, and `--explode` moves the parts apart, a
+  cover off what it covers and a part that `rides` another along with it;
 - `fcad animate` is drawn the same way, so a clip is in those colours too.
 
 the fixture is a red block with a blue block inside it, under a green lid, so
@@ -82,6 +83,50 @@ def compute(p):
     ]
 '''
 NAME = "rproj"
+# an enclosure: a deep cover, open underneath, over a board that carries a chip.
+# the board sits high inside the cover, so the cover's bounding box centre is
+# below it, and the chip is a part of its own only so it can have a colour.
+NESTED = '''
+from FreeCAD import Placement, Rotation, Vector
+
+import fcad
+from fcad.freecad import partdesign
+
+
+def _sq(side):
+    h = side / 2.0
+    return [(-h, -h), (h, -h), (h, h), (-h, h)]
+
+
+def _pad(doc, body, name, side, height, z=0.0, hollow=0.0):
+    sk = partdesign.add_sketch(doc, body, name + "_sketch", points=_sq(side),
+                               z=z, loops=[_sq(hollow)] if hollow else [])
+    pad = body.newObject("PartDesign::Pad", name + "_pad")
+    pad.Profile = sk
+    pad.Length = height
+    doc.recompute()
+
+
+def _cover(doc, body):
+    _pad(doc, body, "walls", 40.0, 20.0, hollow=36.0)
+    _pad(doc, body, "plate", 40.0, 2.0, z=20.0)
+
+
+PARAMS = {"unused": 0}
+
+
+def compute(p):
+    at = lambda z: [Placement(Vector(0, 0, z), Rotation())]
+    return [
+        fcad.PartSpec("cover", at(0), color=(0, 1, 0), length=40.0, build=_cover),
+        fcad.PartSpec("board", at(12), color=(0, 0, 1), length=24.0,
+                      build=lambda d, b: _pad(d, b, "board", 24.0, 2.0)),
+        fcad.PartSpec("chip", at(14), color=(1, 0, 0), length=8.0, rides="board",
+                      build=lambda d, b: _pad(d, b, "chip", 8.0, 4.0)),
+    ]
+'''
+NESTED_NAME = "nested"
+SEAM = 3                     # pixel rows two touching parts may sit apart
 SIZE = "320x240"
 STEP = 4                     # sample every nth pixel: colours, not edges
 # how far one channel must lead the others to count as that colour. shading
@@ -130,9 +175,13 @@ def _said(path, dist, *flags):
 
 
 def _project(root, lid_clear):
-    path = os.path.join(root, NAME + ".fcad")
+    return _write(root, NAME, PROJECT % lid_clear)
+
+
+def _write(root, name, source):
+    path = os.path.join(root, name + ".fcad")
     with open(path, "w") as f:
-        f.write(PROJECT % lid_clear)
+        f.write(source)
     return path
 
 
@@ -178,6 +227,36 @@ def _animate_checks(c, path, dist):
     if os.path.exists(spun + ".mp4"):
         seen = _hues(_frames(spun + ".mp4", os.path.join(dist, "spin_frames"))[0])
         c("... in its own colour (%s)" % sorted(seen), seen == {"b"})
+
+
+def _nested_checks(c, root):
+    """R4.2.2: an explosion is ordered by how the model comes apart.
+
+    ranked by bounding box centre, a deep cover lands under the board it covers;
+    and a part with a level of its own leaves the part it is soldered to."""
+    dist = os.path.join(root, "dist_nested")
+    path = _write(root, NESTED_NAME, NESTED)
+    c("the nested fixture builds", cli.main(["-p", path, "-d", dist, "build",
+                                             "parts", "assembly"]) == 0)
+    apart = _render(path, dist, "apart", "--view", "front", "--explode")
+    c("the nested fixture renders exploded", apart is not None)
+    if apart is None:
+        return
+    cover, board, chip = (_rows(apart, k) for k in "gbr")
+    c("--explode lifts a deep cover off what it covers (cover rows %s, board "
+      "rows %s)" % (cover, board), cover[1] < board[0])
+    c("--explode keeps a part on the one it rides (chip rows %s, board rows %s)"
+      % (chip, board), 0 <= board[0] - chip[1] <= SEAM)
+    # without its carrier a rider is a layer again, and the render still works.
+    c("... and draws it alone when the part it rides is left out",
+      _render(path, dist, "alone", "--explode", "--exclude", "board") is not None)
+
+    lost = _write(root, "lost", NESTED.replace('rides="board"', 'rides="bord"'))
+    cfg = config.resolve(project=lost, dist=os.path.join(root, "dist_lost"))
+    r = subprocess.run([cfg.freecad, entry_path(), "assembly"], capture_output=True,
+                       text=True, env={**os.environ, **cfg.env()})
+    c("a `rides` naming no part fails the build, naming it (%d)" % r.returncode,
+      r.returncode != 0 and "bord" in r.stdout + r.stderr)
 
 
 def main():
@@ -267,6 +346,7 @@ def main():
           rc != 0 and "nosuch" in said and "Traceback" not in said)
 
         _animate_checks(c, path, dist)
+        _nested_checks(c, root)
 
         # the same model with a clear lid: rebuilt, since the look is recorded
         # by the build and read back by the renderer.
