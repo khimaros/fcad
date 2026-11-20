@@ -7,7 +7,8 @@ FreeCAD ships its own bundled python and runs as either a headless console
 work must run inside that bundled interpreter (anything importing `FreeCAD`,
 `Part`, `TechDraw`, the Assembly workbench), some needs the gui specifically
 (TechDraw pdf/svg export, the interactive 3d diff, opening documents view-ready),
-and some is plain python with ordinary pip dependencies (the matplotlib fem pictures).
+and some is plain python with ordinary pip dependencies (animation planning and
+the matplotlib fem pictures).
 
 so fcad is **one package and one cli over three interpreters**, with the cli
 picking the right one per command so the user never has to.
@@ -21,14 +22,17 @@ src/fcad/
                   the project path is a dir (project.py) or a single .fcad file.
                   also names what lands in dist/ (`artifact_stem`), since both
                   sides of the process boundary write there
-  project.py      the Project descriptor + the ready-made `Part` spec; infers
-                  the varset schema/enum choices from PARAMS when not given
+  project.py      the Project descriptor + the ready-made `PartSpec` (aliased as
+                  `Part`), `SubAssembly`, `compose`; infers varset schema/enums
+                  from PARAMS when not given
   loader.py       load a project (a dir's project.py or a .fcad file) and return
                   its Project, declared explicitly (PROJECT) or by convention
   cutlist.py      1d bin packing + 2d guillotine sheet nesting (pure stdlib)
   sheetmetal.py   K-factor bend allowance and flat-pattern SVG export (stdlib)
   motion.py       kinematic keyframe sampling and motion json export (stdlib)
   geom_select.py  topology-safe edge/face predicates for PartDesign (stdlib)
+  optimize.py     parameter sweep over length, boards, price, or mass
+  testing.py      project test harness: geometry checks + `fem_result`/`fem_solve`
   limits.py       what a child may spend: memory budget + estimate, gmsh wall
                   clock, the inherited rlimit (pure stdlib, imported both sides)
   _run.py         spawn the in-freecad entry: own session, inherited ceiling
@@ -39,8 +43,8 @@ src/fcad/
   freecad/        everything that imports FreeCAD (runs under freecadcmd/freecad)
     _entry.py     in-freecad bootstrap: put the package on sys.path, route a command
     dispatch.py   build/validate targets -> part/assembly builders
-    build_parts.py  build_assembly.py  util.py
-    view.py  view_parts.py  export_pdf.py  diff_doc.py
+    build_parts.py  build_assembly.py  util.py  svg_sheet.py
+    view.py  view_parts.py  view_diff.py  export_pdf.py  diff_doc.py  rebuild.py
     render_view.py  the renderer: the gui's own viewer, under xvfb-run. draws
                     a still, or every frame of a clip animate.py planned
     api_docs.py   introspect the installed FreeCAD -> a markdown api reference
@@ -50,7 +54,7 @@ src/fcad/
   render/         plain-python, numpy/matplotlib (the [render] extra): the
                   animation planner and the fem pictures. render.py is what
                   they share
-    render.py  animate.py  fem_render.py  fem_animate.py
+    render.py  animate.py  assemble.py  fem_render.py  fem_animate.py
   resources/macros/rebuild.FCMacro
   resources/templates/fcad_A4_landscape.svg
   resources/skills/                   both installed by `install-skill`:
@@ -84,12 +88,14 @@ the project/name/dist/binaries once, exports them into the environment, then:
   the held output is shown.
 - **fem-render / fem-animate**: imported and called in-process under the cli's
   own python (these are the commands with pip dependencies and no FreeCAD need).
-- **animate**: both. `render/animate.py` plans the clip in-process - the arrival
-  order from the part STLs, then per frame the camera and how far out each
-  instance still is - and writes that as json. `render_view.film` draws the
-  frames from it in the gui under `xvfb-run`, as `render` draws a still, and
-  ffmpeg encodes them. the sequencing stays plain python and testable without a
-  display; the look is the viewer's, shared with the stills.
+- **animate**: both. `render/animate.py` plans the clip in-process -- for
+  `assemble`, the arrival order from the part STLs plus per-frame camera and
+  flight progress; for `motion`, resampling `<name>-motion.json` with position
+  lerp and quaternion SLERP (default 25 fps) -- and writes that as json.
+  `render_view.film` draws the frames from it in the gui under `xvfb-run`, as
+  `render` draws a still, and ffmpeg encodes them. the sequencing stays plain
+  python and testable without a display; the look is the viewer's, shared with
+  the stills.
 - **test**: one `_entry.py test <file>` per project test, rather than handing the
   file to freecadcmd directly. it looks like an indirection and is not: FreeCAD's
   embedded interpreter ignores PYTHONPATH, so a test run directly cannot
@@ -104,24 +110,30 @@ the project/name/dist/binaries once, exports them into the environment, then:
   tree, so overriding `FCAD_PROJECT` alone would have a `.fcad` project silently
   diff itself. `freecadcmd` exits 0 even when the script raised, so `diff.py`
   judges success by whether the artifact appeared, not by the return code.
-- **git-diff**: the external diff driver `install-git` registers, so `git diff` on
-  a `.fcad` file opens the 3d diff. it shares the compute step with `diff` but not
-  the worktree: git already hands it both revisions as files, which is both simpler
-  and more general (any revision pair, not just HEAD). a `.fcad` file is the whole
-  project, so each side builds in isolation from a copy of that one file, with
-  `dist/` landing beside it. it must exit 0 whatever happens - git treats any other
-  status as fatal - so failures are printed, which is where a diff driver's output
-  belongs anyway.
+- **git-diff**: the external diff driver `install-git` registers for built
+  `.FCStd` documents (never `.fcad` source, which stays plain text). git hands
+  it both saved revisions as files, so it builds nothing and covers any revision
+  pair rather than only HEAD: part documents diff as geometry, assembly
+  documents diff as placements resolved against the part files on disk, and
+  `/dev/null` reads as wholly added or removed. it must exit 0 whatever happens
+  - git treats any other status as fatal - so failures are printed, which is
+  where a diff driver's output belongs anyway.
 - **fem**: a headless `freecadcmd` command driving the FEM workbench's gmsh mesher
   and CalculiX solver. it deliberately avoids `fea.run()` and every `*Gui`/VTK
   module (neither exists headless), calling the granular `write_inp_file` /
   `ccx_run` / `load_results` tools instead, and reading the result fields
-  (`vonMises`, `DisplacementVectors`) straight off the result object. it writes a
-  numpy `.npz` (boundary surface + fields + mode shapes) so the plain-python
-  renderers never import FreeCAD: the same hand-off boundary as the STL renderers,
-  one step earlier. face selection resolves geometry predicates to live face refs
-  in this same process, so a fragile "FaceN" index never crosses a process or
-  geometry boundary (`fem_select` stays pure stdlib and importable everywhere).
+  (`vonMises`, `DisplacementVectors`) straight off the result object. when
+  structural parts in an assembly carry distinct `material` values, it builds a
+  conformal `CompSolid` via `generalFuse` and attaches one `MaterialSolid` per
+  region (plus optional `*TIE` constraints); cases may also name `"target"` and
+  `"params"` to solve multiple kinematic poses. it writes a numpy `.npz`
+  (boundary surface + fields + mode shapes + source hash) so the plain-python
+  renderers (`fem_render`, `fem_animate`, which vertex-clusters dense meshes via
+  `fem_render.decimate`) and `fcad.testing.fem_result`/`fem_solve` never import
+  VTK: the same hand-off boundary as the STL renderers, one step earlier. face
+  selection resolves geometry predicates to live face refs in this same process,
+  so a fragile "FaceN" index never crosses a process or geometry boundary
+  (`fem_select` stays pure stdlib and importable everywhere).
   two of its settings are corrections to FreeCAD defaults that are silently wrong
   for fcad's purpose rather than merely coarse. the mesh is **2nd order but
   straight-edged**: linear tets are over-stiff in bending (~20% low), while the
@@ -224,18 +236,19 @@ single file.
   a single shared scale snapped to a standard ratio, the width dimension above
   each view and the height dimension to its right (leaving the space below for
   the view-label caption), and a shipped A4 title-block template
-  (`resources/templates/`) since the bundled default is blank. the same `_page`
-  feeds both the headless DXF (`make_drawing`) and the gui PDF (`export_pdf`).
-- `cutlist` is pure stdlib and never imports FreeCAD, even though the `cutlist`
-  build target runs inside `freecadcmd`: the packing consumes the bom's numbers,
-  not geometry, so the same module is importable by the cli (for its flags and
-  defaults) and by the builder. it carries two solvers because honesty about
-  optimality matters more than always claiming it: a dp over the demand vector
-  while the state x pattern product stays inside a fixed budget, first-fit-
-  decreasing beyond it, with `Plan.exact` recording which one ran. the stock
-  catalog is a project global rather than an fcad table because "what lengths can
-  i buy" is a fact about a supplier, which is exactly the kind of model knowledge
-  the instrumentation must not hold.
+  (`resources/templates/`) since the bundled default is blank. the same
+  `_grid_layout` feeds the headless DXF (`make_drawing`), the gui PDF
+  (`export_pdf`), and the headless dimensioned multi-view SVG sheet
+  (`svg_sheet.write_sheet` for `<name>.svg` and `parts/<part>.svg`, while
+  `sketches/<part>.svg` stays the bare 1:1 defining sketch).
+- `cutlist`, `sheetmetal`, `motion`, `geom_select`, `fem_select`, `limits`, and
+  `config` stay pure stdlib and never import FreeCAD, so both the cli and
+  in-FreeCAD builders share one implementation. `cutlist` carries exact dp +
+  first-fit-decreasing 1D packing (`Plan.exact` recording which ran) alongside
+  2D guillotine nesting for `fcad.Sheet` entries (consuming `sheet_size` or
+  `sheetmetal` `flat_pattern` dimensions). `STOCK` may be a static dict or a
+  callable `(values) -> dict` because supplier lengths and sheets are project
+  data, never fcad knowledge.
 - `diff_doc` diffs **per part**, not per assembly. the kernel's boolean cost is
   superlinear in the combined faces of its two arguments, so cutting a compound of
   every changed solid against another compound of every changed solid does not

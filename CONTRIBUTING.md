@@ -14,10 +14,11 @@ install editable so the `fcad` console script tracks your working tree:
 uv tool install -e .
 ```
 
-`config.py`, `cutlist.py` and `fem_select.py` must stay pure stdlib (every
-interpreter imports them, `config` even at install time). keep
-`import FreeCAD`/`Part`/`TechDraw` confined to `src/fcad/freecad/`, and
-numpy/matplotlib confined to `src/fcad/render/`.
+`config.py`, `cutlist.py`, `fem_select.py`, `geom_select.py`, `limits.py`,
+`motion.py`, and `sheetmetal.py` must stay pure stdlib (every interpreter
+imports them, `config` even at install time). keep `import FreeCAD`/`Part`/
+`TechDraw` confined to `src/fcad/freecad/`, and numpy/matplotlib confined to
+`src/fcad/render/`.
 
 ## testing
 
@@ -158,7 +159,7 @@ entrypoints work around gotchas the gui session introduces:
   (`view.py`/`view_diff.py` use the same call without saving, since they don't
   persist their display-only view state).
 
-## FreeCAD 1.1.1 api notes (confirmed on this machine)
+## FreeCAD 1.1.x api notes (confirmed on this machine)
 
 run scripts with `freecadcmd <script.py> [args]`. note `sys.argv` is
 `['freecadcmd', '<script>', ...]` (script is argv[1], not argv[0]); `__name__`
@@ -200,7 +201,13 @@ for the script name.
   `resources/templates/`. a title block needs `freecad:editable="Name"` text
   elements (mirror `HowToExample.svg`'s element style; TechDraw's parser is
   picky); fill them with `tmpl.EditableTexts = {name: value}`. only the template
-  border + editable text render in the **pdf**; `writeDXFPage` does not emit them.
+  border + editable text render in the **pdf**; `writeDXFPage` emits neither
+  those nor `DrawViewAnnotation`, so `util._write_dxf_bom` appends DXF `TEXT`
+  entities directly into the exported DXF when an assembly BOM table is present.
+- **PartDesign dress-ups move `body.Tip` immediately:** calling
+  `body.newObject("PartDesign::Chamfer", ...)` (or `Fillet`) moves `body.Tip` to
+  the still-empty feature before `Base` is set. capture `base = body.Tip` before
+  calling `newObject`, then pass `(base, edges)` to `Base`.
 - **gui pdf export races the threaded HLR:** in the gui TechDraw projects each
   `DrawViewPart` on a worker thread, so `exportPageAsPdf` fired too early drops
   the still-computing views from the pdf at random (`export_pdf` showed only the

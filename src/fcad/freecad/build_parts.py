@@ -89,7 +89,10 @@ def build_one(project, spec, values, dirs, formats):
         fcutil.export_stl([obj], stem + ".stl")
         clock.lap("stl")
     if "svg" in formats:
-        fcutil.export_svg_edges(obj.Shape, stem + ".svg")
+        fcutil.export_svg_sheet(
+            obj.Shape, stem + ".svg", PART_VIEW, holes=holes,
+            callouts=callouts,
+            title={"part": spec.name, "project": project.name})
         clock.lap("svg")
     # save the part file before the drawing exports: dxf/drawing/sketch all add
     # TechDraw pages to the document, and we want the saved .FCStd to contain

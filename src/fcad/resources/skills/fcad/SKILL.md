@@ -60,8 +60,6 @@ a whole project can be one file: a directory's `project.py`, or a standalone
 registered source suffix).
 
 ```python
-from FreeCAD import Placement
-
 import fcad
 from fcad.freecad import partdesign
 
@@ -70,13 +68,13 @@ PARAMS = {"length": 100.0, "width": 60.0, "height": 20.0, "bore": 12.0}
 def _block(doc, body, p):
     l, w = p["length"] / 2.0, p["width"] / 2.0
     partdesign.pad_and_bore(doc, body, [(-l, -w), (l, -w), (l, w), (-l, w)],
-                            p["height"], [(0.0, 0.0, p["bore"])], name="block")
+                            p["height"], [(0.0, 0.0, p["bore"])])
 
 def compute(p):
-    return [fcad.PartSpec("block", placements=[Placement()], length=p["length"],
+    return [fcad.PartSpec("block", length=p["length"],
                           build=lambda doc, body: _block(doc, body, p),
-                          dimension_sketches=["block_bore1"],
-                          openings=["block_bore1"])]
+                          dimension_sketches=["*_bore*"],
+                          openings=["*_bore*"])]
 ```
 
 **that part is a `PartDesign::Body`** - fully-constrained sketch, `Pad`, one
@@ -258,23 +256,27 @@ description of a part.
 
 `fcad.freecad.partdesign` offers helpers, to call or to crib from (`add_text`,
 for lettering, is further down):
-`add_sketch(doc, body, name, points=(), loops=(), circles=(), z=0.0,
+`add_sketch(doc, body, name, points=(), loops=(), circles=(), slots=(), z=0.0,
 placement=None)` emits a **fully-constrained** sketch (which `check` requires)
 and returns it, and `pad_and_bore(doc, body, points, thickness, holes=(),
-name="part")` is the shape most parts are. neither is a layer - they make the calls you would make. a project
-wanting arcs, splines or constraints between elements calls Sketcher directly.
+name=None)` (`name` defaults to `body.Name`) is the shape most parts are.
+neither is a layer - they make the calls you would make. a project wanting
+splines or constraints between arbitrary elements calls Sketcher directly.
 
 what `add_sketch` takes, since it is the call a `build` makes most. everything
 after `name` is optional and defaults to empty, so a sketch of `circles` alone -
 the profile of a bore - is a complete call:
 
-- `points` is the outline, a closed polygon of `(x, y)` in the sketch's own
-  plane. `loops` is a list of further closed polygons and `circles` a list of
-  `(cx, cy, dia)`. **they combine in one sketch**: a loop or circle inside the
-  outline is a hole in the face a Pad extrudes.
-- so **a window, a ring, a frame or a plate with clearance holes is one sketch
-  and one Pad**. reach for that before a Pocket: there is no direction to get
-  wrong, and a part that is mostly hole (a gasket) has one feature, not two.
+- `points` is the outline, a closed polygon of `(x, y)` or `(x, y, r)` tuples
+  in the sketch's own plane, where `r > 0` rounds that corner with a true
+  fully-constrained tangent circular arc. `loops` is a list of further closed
+  polygons (sharp or rounded), `circles` a list of `(cx, cy, dia)`, and `slots`
+  a list of `(x1, y1, x2, y2, width)` stadium slots. **they combine in one
+  sketch**: a loop, circle, or slot inside the outline is a hole in the face a
+  Pad extrudes.
+- so **a window, a ring, a frame or a plate with clearance holes or slots is one
+  sketch and one Pad**. reach for that before a Pocket: there is no direction to
+  get wrong, and a part that is mostly hole (a gasket) has one feature, not two.
 - `z` lifts a sketch parallel to XY. `placement` puts it anywhere else and wins
   when both are given: `Placement(Vector(0, 0, 0), Rotation(Vector(1, 0, 0), 90))`
   stands it on XZ (sketch x is X, sketch y is Z) for a revolution or a side
@@ -285,23 +287,25 @@ the profile of a bore - is a complete call:
   that points is easy to get wrong. `pad.SideType = "Symmetric"` spends `Length`
   half each way from the sketch, so put the sketch on the feature's mid-plane
   and there is no direction to choose.
-- a rounded outline is a polygon with enough points; an exact arc needs Sketcher.
 
 **dress-ups work on a body like any other feature**, and are what make a model
 read as an object rather than as extruded outlines - break the outside edges of
-a housing, round a strap. pick the edges by geometry, never by number:
+a housing, round a strap. pick edges by geometry with `fcad.geom_select`, never
+by hardcoded `EdgeN`:
 
 ```python
+from fcad import geom_select as gs
+
 def housing(doc, body):
     sk = partdesign.add_sketch(doc, body, "outline", points=pts)
     pad = body.newObject(types.PartDesign.Pad, "pad")
     pad.Profile = sk
     pad.Length = h
     doc.recompute()
-    top = ["Edge%d" % i for i, e in enumerate(pad.Shape.Edges, 1)
-           if all(abs(v.Point.z - h) < 1e-6 for v in e.Vertexes)]
+    base = body.Tip
+    top = gs.edges(base.Shape, gs.at_z(h))
     bevel = body.newObject(types.PartDesign.Chamfer, "top_bevel")
-    bevel.Base = (pad, top)
+    bevel.Base = (base, top)
     bevel.Size = 0.8
     doc.recompute()
 ```
@@ -338,9 +342,9 @@ Chamfer or LinearPattern is available the day FreeCAD ships it, with nothing to
 add here. their properties are tabled in the freecad-python skill's
 `api/properties.md`.
 
-why it is not just tidier. a part used to be described *twice* - `holes` said
-where the bores were while the project cut them separately, and `profile2d` was
-an outline drawn beside a solid it might not match - and `check` carried two
+why a single description matters. a part used to be described *twice* - `holes`
+said where the bores were while the project cut them separately, and `profile2d`
+was an outline drawn beside a solid it might not match - and `check` carried two
 assertions whose only job was to police that gap. both are gone: a bore that *is*
 a feature cannot be declared-and-not-bored, and a sketch that *is* what was
 padded cannot drift from it. that is two checks deleted rather than passing. a
@@ -352,10 +356,11 @@ and `PartDesign::Hole` carries what a `Part.Shape` throws away - `DepthType`
 `ThreadType` (ISO metric, UNC, NPT, BSP...), `Threaded`, `DrillPoint`. a bore cut
 as a boolean is just a cylindrical face afterwards; a Hole knows it is a hole.
 
-pass `solid=` for geometry no feature tree describes - imported, scripted, or
-swept from something fcad cannot name. those parts keep the plain
-`Part::Feature`. `examples/fastenplates` has one of each: a declared plate and a
-turned screw.
+pass `solid=` for geometry no feature tree describes - imported (or use
+`PartSpec.from_step`), scripted, or swept from something fcad cannot name. those
+parts keep the plain `Part::Feature`. `examples/fastenplates` shows both ways to
+write a declared body (`pad_and_bore` for the plate, `PartDesign::Revolution`
+for the screw); `examples/robotarm` adds `PartSpec.from_step` for a COTS motor.
 
 **the cost, so you can weigh it:** a declared part is built by a real recompute,
 about 17 ms against 3 ms for hand-rolled booleans, and its *blank* costs one more
@@ -423,9 +428,13 @@ all of them with hidden lines removed, so four lines of text add about a minute
 to a part's build. keep it to the part that needs it.
 
 when a feature must name an edge or face of an earlier one, **pick it by geometry
-rather than by `EdgeN`** - enumerate `pad.Shape.Edges`, filter on a predicate,
-and use the index you found. that is the same rule `fem_select` follows for FEM
-faces, and it is what keeps a model from breaking when the topology renumbers.
+rather than by `EdgeN`** using `fcad.geom_select` (`gs.edges(base.Shape,
+gs.at_z(h))`, `gs.along_axis("z")`, `gs.curved()`, `gs.all_of(...)`,
+`gs.faces(base.Shape, gs.normal_dir("+z"), exact=1)`). it raises `ValueError` on
+zero or unexpected matches rather than silently passing `[]` to `Fillet` or
+`Chamfer`. capture `base = body.Tip` **before** calling `body.newObject(...)`,
+since creating the new feature immediately moves `body.Tip` to the still-empty
+object.
 
 ### varset schema inference
 
@@ -453,10 +462,10 @@ run from the project directory and none of it needs overriding.
 fcad build [TARGET ...]   no target = all; one freecadcmd pass per token. a
                           token is a target (parts, assembly, step, ...) or a
                           part's name, which builds that part alone
-fcad check                the ten assertions below
+fcad check                the eleven assertions below
 fcad precommit            build all, then check
 fcad test [PATH ...]      run tests/test_*.py, judged by their verdict file
-fcad optimize P [P ...]   sweep parameters for a cheaper cut list
+fcad optimize P [P ...]   sweep parameters (--objective length|boards|price|mass)
 fcad view [parts]         gui; --part NAME for one part
 fcad render [T] [PNG]     offscreen png in the parts' colours (below)
 fcad animate [T]          mp4+gif in the parts' colours, drawn as render is
@@ -498,15 +507,17 @@ PATH.
 
 **animating** is a camera crossed with a subject, shared by both animators.
 `--camera orbit|turntable|fixed` (orbit sweeps its elevation so the underside
-comes into view; turntable spins level). `fcad animate` defaults to
-`--subject assemble`, the model building itself part by part; `--subject static`
-orbits it whole, and a part target spins on its own since it has nothing to
-assemble. its frames come from render's viewer, so a part's `color` and
-`transparency` show in the clip; `--size WxH` sets the frame. `fcad fem-animate --subject all|flex|static|modes`, where `static`
-holds peak deflection and lets the camera work - usually the clip worth having.
-length is derived from the content (an assembly of twenty parts arriving singly
-is a longer film than three), so `--speed` multiplies it rather than `--seconds`
-setting it.
+comes into view; turntable spins level). `fcad animate` supports three subjects:
+`--subject assemble` (default for assemblies: parts flying in to build the
+model), `--subject static` (default for parts: orbits whole), and `--subject
+motion` (interpolates `<name>-motion.json` with position lerp + quaternion
+SLERP at 25 fps by default, writing `<name>.motion.{mp4,gif}`). its frames come
+from render's viewer, so a part's `color` and `transparency` show in the clip;
+`--size WxH` sets the frame. `fcad fem-animate --subject all|flex|static|modes`,
+where `static` holds peak deflection and lets the camera work - usually the clip
+worth having (dense meshes are automatically vertex-clustered below
+`FCAD_FEM_MAX_TRIS`). length is derived from the content, so `--speed`
+multiplies it rather than `--seconds` setting it.
 
 **build targets:** `parts assembly step stl svg dxf drawings sketches bom
 cutlist`. multiple tokens union. stage-bound tokens keep their meaning:
@@ -518,12 +529,13 @@ assembly knows how many of a part there are).
 2. no structural solids interpenetrate (`embeds` parts excluded)
 3. every `embeds` part is seated: it displaces nothing, and something holds it
 4. every part is grounded, fastened, or resting on another
-5. no part cuts away more material than anything fills
+5. no part cuts away more material than anything fills (`cots=True` skipped)
 6. every circle a part dimensions is actually bored in it
-7. every part is one connected solid
-8. every assembly component is grounded or jointed
-9. every defining sketch is fully constrained
-10. every feature changes its part (a cut run the wrong way removes nothing)
+7. every part is one connected solid (`disjoint=True` and `cots=True` skipped)
+8. every sampled pose in `MOTION` (when declared) holds constraints, clears overlaps, and seats fasteners
+9. every assembly component is grounded or jointed
+10. every defining sketch is fully constrained
+11. every feature changes its part (a cut run the wrong way removes nothing)
 
 (1) is the project's own statement of when the model still means what it says,
 and is checked first because a model that has stopped meaning it makes the rest
@@ -583,18 +595,20 @@ notes on the ones with judgement in them:
 ## what lands in dist/
 
 ```
-parts/<name>.{FCStd,step,stl,svg,dxf}
-drawings/<name>.dxf   drawings/assembly.dxf     dimensioned techdraw sheets
-sketches/<name>.{svg,dxf}    defining sketches, parts only. a declared part's own;
-                             else its `profile`/`profile2d` outline plus the
-                             circles it names in `dimension_circles`
-<name>.{FCStd,step,stl,svg,dxf}                 the linked assembly + exports
-<name>-bom.csv          part,qty,profile,length_mm
+parts/<name>.{FCStd,step,stl,svg,dxf}           .svg is a dimensioned 4-view A4 sheet (TOP/FRONT/RIGHT/ISO + holes)
+drawings/<name>.dxf   drawings/assembly.dxf     dimensioned techdraw sheets (+ Hole callouts & assembly BOM)
+sketches/<name>.{svg,dxf}    1:1 defining sketches, parts only. a declared part's own;
+                             else its `profile`/`profile2d` outline plus `dimension_circles`
+sketches/<name>-flat.svg     sheet-metal flat pattern with dashed bend lines (when `flat_pattern` set)
+<name>.{FCStd,step,stl,svg,dxf}                 linked assembly + exports (.svg is a 4-view A4 sheet + BOM)
+<name>-bom.csv          part,qty,profile,length_mm[,bom_group,sku,unit_cost,mass_g]
 <name>-cutlist.csv      profile,pattern,stock_mm,boards,cut_mm,per_board,offcut_mm
+<name>-sheetlist.csv    2D sheet nesting plan (when `STOCK` uses `fcad.Sheet`)
 <name>-placements.json  per-instance placements, for the 3d diff
 <name>-parts.json       per-part grounded/embeds/rides and look, for animate and render
+<name>-motion.json      sampled kinematic placements (when `MOTION` is declared)
 <name>[.<view>][.section-<axis>][.explode].png   the render
-<name>.assemble.{mp4,gif}   <name>.spin.{mp4,gif}
+<name>.assemble.{mp4,gif}   <name>.spin.{mp4,gif}   <name>.motion.{mp4,gif}
 <name>.fem.{FCStd,npz,png,mp4,gif}   <name>.fem.mode<K>.{mp4,gif}
 <name>.diff.FCStd
 parts/<part>.png   parts/<part>.spin.*   parts/<part>.fem.*   parts/<part>.diff.FCStd
@@ -605,9 +619,11 @@ after them**: the assembly's next to `<name>.FCStd`, a part's next to
 `parts/<part>.FCStd`. so `fcad render` writes `<name>.png` - one more export of
 the model - and `fcad render case` writes `parts/case.png`.
 
-the two json files exist because a renderer runs outside FreeCAD and cannot call
-`compute`: the diff needs both revisions' placements, and the animator needs the
-flags. every assembly build writes them whatever formats were asked for.
+the json files exist because renderers and animators run outside FreeCAD and
+cannot call `compute`: the diff needs both revisions' placements, the animator
+needs the per-part flags/look, and `--subject motion` reads the sampled pose
+frames. every assembly build writes placements and parts whatever formats were
+asked for, and writes `-motion.json` whenever `MOTION` is declared.
 
 the assembly `.FCStd` is a real Assembly-workbench assembly: each instance is an
 `App::Link` into its part file, grounded or Fixed-jointed and solved.
@@ -651,15 +667,17 @@ joint satisfies it - the hook is not an escape from the assertion.
 
 | key | meaning |
 | --- | --- |
-| `fixed` | list of face selectors, clamping the face outright (default: `min_along("z")`) |
+| `fixed` | list of face selectors (or callable `(values) -> [...]`), clamping the face outright (default: `min_along("z")`) |
 | `supports` | `[dict(faces=[...], fix="yz")]` - restrain only the named axes |
-| `loads` | list of load dicts |
+| `ties` | `[dict(master=sel_a, slave=sel_b, tolerance=1.0)]` - explicit CalculiX `*TIE` bonded faces |
+| `loads` | list of load dicts (or callable `(values) -> [...]`); each load's `magnitude` may be a number or `lambda p: p[...]` |
 | `self_weight` | default `not loads`; `gravity` defaults to `(0,0,-1)` |
 | `mesh_size` | clamped to 1..25 mm; default bbox diagonal / 20 |
 | `mesh_min` / `mesh_curvature` | element floor, and how hard gmsh chases curvature (12/turn) |
-| `undrilled` | build parts from their 2d profile, dropping the holes |
+| `undrilled` | build parts from their blank, dropping the holes |
+| `target` / `params` | solve an underlying target (`"assembly"` or part) with `PARAMS` overrides (e.g. a second kinematic pose) |
 | `modes` | eigenmode count |
-| `material` | library card name, an fcad alias (`steel`/`aluminum`/`wood`/...), a `MATERIALS` name, or `{E, nu, rho}`; falls back to `MATERIAL` |
+| `material` | library card name, an fcad alias (`steel`/`aluminum`/`wood`/...), a `MATERIALS` name, or `{E, nu, rho}`; falls back to `MATERIAL`. when structural parts in an assembly set distinct `PartSpec(..., material=...)`, fcad builds a conformal multi-material `CompSolid` with per-region materials |
 
 `fixed` is a clamp: every node pinned, so the face cannot rotate. clamping both
 ends of a member reads exactly 5x stiff against one resting on its bearings, and
@@ -723,7 +741,7 @@ CONSTRAINTS = [
 which is the only thing that makes a sweep safe:
 
 ```
-fcad optimize outer_len outer_wid --span 60 --step 10 --objective boards
+fcad optimize outer_len outer_wid --span 60 --step 10 --objective length|boards|price|mass
 ```
 
 it varies the named numeric params over a grid, packs the real bom for each
@@ -731,11 +749,13 @@ through the cut list solver, and ranks them. without constraints it will find
 the corner where the model degrades and report it as a saving, because from the
 outside there genuinely are fewer boards - a real sweep once "saved" three
 boards by quietly shrinking a planter's bed by 50 mm. a project that declares
-none is warned, loudly, in the output.
+none is warned, loudly, in the output, and so is one whose swept 1D stock parts
+omit explicit `length=`.
 
-ranking follows `--objective`, and the choice matters more here than in the cut
-list: on a real model the fewest-boards answer bought 3.6 m *more* timber than a
-plan with one board extra. purchased length is the default for that reason.
+ranking follows `--objective`: `length` (default: least purchased 1D length),
+`boards` (fewest boards), `price` (1D stock + 2D `Sheet` stock + COTS
+`unit_cost`), or `mass` (total grams from explicit `mass_g` or `volume *
+density`).
 
 ## testing a project
 
@@ -784,26 +804,66 @@ they read a project however it declares
 itself: a `compute` returning the bare list or the dict form, and specs realized
 by a module-level `from_spec` or by the `fcad.PartSpec`'s own `solid()` thunk.
 
+**conventions and patterns:**
+
+- put a project's tests in a single `tests/test_<name>.py` (matching the `.fcad`
+  stem, as all four shipped examples do: `test_hexnut.py`, `test_fastenplates.py`,
+  `test_cantilever.py`, `test_robotarm.py`) unless slow FEM tests need to be
+  run selectively via `fcad test tests/test_fem.py`.
+- **testing FEM results:** call `testing.fem_solve(target)` to get a `FemResult`
+  (`max_disp`, `vm_p95`, `vm_p99`, `vm_max`, `mode_freqs`, `first_mode`,
+  `safety_factor(yield_mpa, percentile=95)`). when a fresh stamped `.npz`
+  already sits in `dist/`, `fem_solve` loads it in milliseconds without
+  re-running CalculiX; when the project source changed or `dist/` is empty, it
+  re-solves and caches the new bundle. pass `values={...}` to test a parameter
+  or load override in a throwaway scratch dir without overwriting `dist/` (e.g.
+  confirming `2x` load produces `2.00x` deflection, or comparing extended vs
+  retracted poses). call `testing.fem_result(target, solve=False)` in CI when
+  you want a missing or stale `.npz` to fail loudly instead of solving.
+  wherever a closed form exists (`F*L^3/(3*E*I)` on a beam), assert against the
+  closed form, not just against a previous run (`examples/cantilever/tests/test_cantilever.py`).
+- **testing articulation & kinematics:** sweep pose parameters via
+  `mod.compute(dict(mod.PARAMS, theta=...))` to assert reach, joint angles,
+  clearances (`testing.overlap(...) < 1e-3`), and actuator stroke
+  (`a.distToShape(b)[0]`). call `build_assembly.find_motion_issues(project, p)`
+  to assert the declared `MOTION` trajectory has zero collisions or constraint
+  violations, assert `project.violations(bad_pose)` rejects out-of-envelope
+  poses, and inspect `o.JointType` in the saved `.FCStd` assembly
+  (`examples/robotarm/tests/test_robotarm.py`).
+
 the import needs no preamble. FreeCAD's embedded interpreter ignores PYTHONPATH,
 so a test handed straight to freecadcmd cannot resolve `fcad` at all - which is
 why projects hand-rolled a `sys.path` insert pointing at the fcad checkout.
 `fcad test` runs each test through the same bootstrap the build path uses
-instead, so `from fcad import testing` just works. `examples/fastenplates/tests/`
-is the whole shape of it.
+instead, so `from fcad import testing` just works.
 
-## STOCK and the cut list
+## STOCK, 2D sheets, and sheet metal
 
-`fcad build cutlist` packs each bom profile's pieces into buyable stock lengths
-and writes `dist/<name>-cutlist.csv` plus a summary line per profile.
+`fcad build cutlist` packs each 1D bom profile's pieces into buyable stock
+lengths (`dist/<name>-cutlist.csv`) and each 2D `fcad.Sheet` profile's blanks
+into buyable sheets (`dist/<name>-sheetlist.csv`).
 
 ```python
 FT = 304.8
-STOCK = {"2x6": [8*FT, 10*FT, 12*FT, 16*FT], "2x4": [8*FT, 10*FT, 12*FT]}
+STOCK = lambda p: {
+    "2x6": [(8*FT, 9.0), (12*FT, 13.5)],
+    "2mm al sheet": [fcad.Sheet(400.0, 300.0, price=18.0)],
+}
 ```
 
-an entry may carry a price as `(length, price)`, which adds a cost to the
-totals line. the summary ends with one, because per-profile lines answer "how do
-I cut the 2x6" and nobody's shopping list is one profile:
+prefer a callable `STOCK = lambda p: ...` whenever profile labels depend on
+`PARAMS` (e.g. `"bar %gx%g" % (p["wid"], p["thk"])`), so sweeping those
+parameters still matches the stock table instead of going stale on import-time
+defaults. a static dict or bare list still works.
+
+for bent sheet-metal parts, attach `flat_pattern=sheetmetal.unfold_u_channel(...)`
+or `sheetmetal.unfold_box_tray(...)` to `PartSpec`: fcad computes K-factor bend
+allowances, exports `dist/sketches/<part>-flat.svg` with solid cut contours and
+dashed red bend lines, and feeds the unfolded `(width, height)` into 2D sheet
+nesting automatically (flat plates without bends just set `sheet_size=(w, h)`).
+
+an entry may carry a price as `(length, price)` or `fcad.Sheet(w, h, price=...)`,
+which adds a cost to the totals line and enables `fcad optimize --objective price`:
 
 ```
   total: 16 board(s), 55474 mm purchased, 2386 mm waste (4.3%)
@@ -848,10 +908,18 @@ Macro menu.
 - `solid` is a thunk, and so is `build`. work done outside them runs on every
   metadata-only pass.
 - every sketch a `build` emits must come out **fully constrained** or `check`
-  fails on it. `partdesign.add_sketch` does that for outlines and circles;
-  hand-written Sketcher code has to do its own.
+  fails on it. `partdesign.add_sketch` does that for outlines (sharp or rounded
+  `(x, y, r)` corners), loops, `slots`, and circles; hand-written Sketcher code
+  has to do its own.
+- **capture `base = body.Tip` before `body.newObject(Chamfer/Fillet, ...)`:**
+  creating the dress-up moves `body.Tip` to the new empty feature immediately,
+  so `gs.edges(body.Tip.Shape, ...)` after `newObject` sees zero edges.
+- **do not freeze `PARAMS[...]` inside static `STOCK` or `FEM` dicts:** use
+  `STOCK = lambda p: ...` and `"magnitude": lambda p: p["..."]` so edits,
+  multi-pose FEM overrides, and `optimize` sweeps see live parameter values.
 - **state `length=` on any model you sweep.** without it the bom builds the
-  part's shape to read a bounding box, and `optimize` does that per candidate.
+  part's shape to read a bounding box, and `optimize` warns and does that per
+  candidate.
 - forget `embeds=True` on a fastener and `check` reports it as interference.
 - `length` defaults to the bbox X-extent; mitered or rotated parts usually need
   it stated.
@@ -860,13 +928,15 @@ Macro menu.
   notch - where linear elasticity has no finite answer, so it simply grows as the
   mesh is refined. the shipped cantilever goes from 74.9 to 12848 MPa between
   `mesh_size` 6 and 2 while its p95 stays near 70 and its deflection does not
-  move. quote `von_mises_p95`, and treat `max` as a sample. (the caveat on p95:
-  it is a floor on the field stress, since on a clamped model the moment peaks at
-  the constrained end and a percentile discards exactly those nodes.)
-- **the assembly fem target is one welded body.** fcad fuses the structural
-  solids, so every butt joint becomes a weld and the box reads ~10x stiffer than
-  the screwed frame it models. it is a picture of load flow, not a number to size
-  against - size against the per-part cases.
+  move. quote `von_mises_p95` / `FemResult.safety_factor(...)`, and treat `max`
+  as a sample. (the caveat on p95: it is a floor on the field stress, since on a
+  clamped model the moment peaks at the constrained end and a percentile discards
+  exactly those nodes.)
+- **the assembly fem target is rigidly bonded.** single-material assemblies fuse
+  into one body, and multi-material assemblies build a conformal `CompSolid`
+  (sharing mesh nodes across touching faces); either way every butt joint acts as
+  a weld and reads stiffer than a screwed frame. treat assembly FEM as load flow
+  and pose comparison, and size critical members against per-part cases.
 - a fem case tuned before 2nd-order meshing will be far too fine: the same
   `mesh_size` now carries several times the nodes. if a solve is refused for
   memory, raise `mesh_size` rather than reaching for `FCAD_MEM`.

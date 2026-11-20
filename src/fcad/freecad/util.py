@@ -474,6 +474,40 @@ def _norm_cells(directions):
     return out
 
 
+def _grid_layout(bb, cells, dims=False, gap=None, margin=None,
+                 sheet_w=SHEET_W, sheet_h=SHEET_H,
+                 sheet_cx=SHEET_CX, sheet_cy=SHEET_CY,
+                 scales=PREFERRED_SCALES):
+    """shared projection-aligned grid geometry for TechDraw and SVG sheets.
+
+    returns `(sizes, scale, colx, rowy)` with `colx` and `rowy` in TechDraw
+    page coordinates (A4 landscape 297x210, Y growing up)."""
+    sizes = {label: _proj_size(bb, d, x) for label, d, x, _c, _r in cells}
+    ncols = max(c for *_, c, _r in cells) + 1
+    nrows = max(r for *_, _c, r in cells) + 1
+    colw = [max(sizes[c[0]][0] for c in cells if c[3] == i) for i in range(ncols)]
+    rowh = [max(sizes[c[0]][1] for c in cells if c[4] == i) for i in range(nrows)]
+    if gap is None:
+        gap = 34.0 if dims else 16.0
+    if margin is None:
+        margin = 30.0 if dims else 10.0
+    fit = min((sheet_w - gap * (ncols - 1) - margin) / max(sum(colw), 1e-6),
+              (sheet_h - gap * (nrows - 1) - margin) / max(sum(rowh), 1e-6))
+    cap = min(fit, 10.0)
+    scale = next((s for s in scales if s <= cap), scales[-1])
+    block_w = sum(colw) * scale + gap * (ncols - 1)
+    block_h = sum(rowh) * scale + gap * (nrows - 1)
+    colx, acc = [], sheet_cx - block_w / 2.0
+    for w in colw:
+        colx.append(acc + w * scale / 2.0)
+        acc += w * scale + gap
+    rowy, acc = [], sheet_cy + block_h / 2.0
+    for h in rowh:
+        rowy.append(acc - h * scale / 2.0)
+        acc -= h * scale + gap
+    return sizes, scale, colx, rowy
+
+
 def _page(doc, sources, directions, tag="", dims=False, title=None):
     """build a TechDraw page laying the views out on a projection-aligned grid.
 
@@ -484,17 +518,7 @@ def _page(doc, sources, directions, tag="", dims=False, title=None):
     have offline, so all dxf goes through TechDraw, which writes dxf natively."""
     cells = _norm_cells(directions)
     bb = _bbox(sources)
-    sizes = {label: _proj_size(bb, d, x) for label, d, x, _c, _r in cells}
-    ncols = max(c for *_, c, _r in cells) + 1
-    nrows = max(r for *_, _c, r in cells) + 1
-    colw = [max([sizes[c[0]][0] for c in cells if c[3] == i]) for i in range(ncols)]
-    rowh = [max([sizes[c[0]][1] for c in cells if c[4] == i]) for i in range(nrows)]
-
-    gap = 34.0 if dims else 16.0
-    margin = 30.0 if dims else 10.0  # outer room for extent dims + hole callouts
-    fit = min((SHEET_W - gap * (ncols - 1) - margin) / max(sum(colw), 1e-6),
-              (SHEET_H - gap * (nrows - 1) - margin) / max(sum(rowh), 1e-6))
-    scale = _snap_scale(min(fit, 10.0))
+    sizes, scale, colx, rowy = _grid_layout(bb, cells, dims=dims)
 
     page = doc.addObject("TechDraw::DrawPage", "Page" + tag)
     tmpl = doc.addObject("TechDraw::DrawSVGTemplate", "Template" + tag)
@@ -516,17 +540,6 @@ def _page(doc, sources, directions, tag="", dims=False, title=None):
         page.addView(view)
         views[label] = (view, col, row)
 
-    # cell centers: columns left to right, rows top down (techdraw y grows up).
-    block_w = sum(colw) * scale + gap * (ncols - 1)
-    block_h = sum(rowh) * scale + gap * (nrows - 1)
-    colx, acc = [], SHEET_CX - block_w / 2.0
-    for w in colw:
-        colx.append(acc + w * scale / 2.0)
-        acc += w * scale + gap
-    rowy, acc = [], SHEET_CY + block_h / 2.0
-    for h in rowh:
-        rowy.append(acc - h * scale / 2.0)
-        acc -= h * scale + gap
     for view, col, row in views.values():
         view.X, view.Y = colx[col], rowy[row]
     # one recompute for the views, placed before it rather than after: each
@@ -585,3 +598,11 @@ def make_drawing(doc, sources, path, directions, holes=(), title=None,
     if bom:
         _write_dxf_bom(path, bom)
     return page
+
+
+def export_svg_sheet(shape, path, directions, holes=(), callouts=None,
+                     bom=None, title=None):
+    """write a dimensioned A4 landscape multi-view SVG sheet headlessly."""
+    from fcad.freecad.svg_sheet import write_sheet
+    return write_sheet(shape, path, directions, holes=holes,
+                       callouts=callouts, bom=bom, title=title)

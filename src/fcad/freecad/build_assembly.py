@@ -897,7 +897,9 @@ def build(project, values, dirs, formats):
             fcutil.export_stl([obj], stem + ".stl")
             clock.lap("stl")
         if "svg" in formats:
-            fcutil.export_svg_edges(compound, stem + ".svg")
+            fcutil.export_svg_sheet(
+                compound, stem + ".svg", ASM_VIEWS, bom=specs,
+                title={"part": "assembly", "project": project.name})
             clock.lap("svg")
         if "dxf" in formats:
             fcutil.export_dxf(doc, [obj], stem + ".dxf")

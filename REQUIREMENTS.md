@@ -11,8 +11,9 @@ never regress on them.
 - R1.1 a project is a directory holding a `project.py`, or a single `.fcad` file
   (python by another name: a whole project in one file). it may expose an
   explicit `PROJECT = fcad.Project(...)`, or, equivalently, the conventional
-  module globals `PARAMS` + `compute` (plus optional `PARAM_META`, `FEM`,
-  `MATERIAL`, `MATERIALS`, `STOCK`, `from_spec`, `profile`, `NAME`), from which
+  module globals `PARAMS` + `compute` (plus optional `PARAM_META`, `CONSTRAINTS`,
+  `ASSEMBLE`, `MOTION`, `FEM`, `MATERIAL`, `MATERIALS`, `STOCK`, `from_spec`,
+  `profile`, `NAME`), from which
   fcad assembles the `Project`, inferring the varset schema (property type from
   each default's python type), enum choices, and per-part `qty`/`length`. either way
   fcad reads everything through one `Project` and carries zero model knowledge.
@@ -33,12 +34,6 @@ never regress on them.
   cannot derive a blank for. `fcad.PartSpec` is the ready-made part (`fcad.Part`
   remains an alias); a project may use its own type exposing the same surface. an
   assembly with no part flagged `grounded` anchors its first part.
-- R1.3 `fcad.geom_select` provides topology-safe edge and face predicates
-  (`at_x`/`at_y`/`at_z`, `along_axis`, `normal_dir`, `curved`, `straight`,
-  `in_box`, `all_of`, `any_of`, `invert`) for `PartDesign` features and fails
-  loudly on zero or unexpected match counts. `partdesign.add_sketch` supports
-  per-vertex fillet radii `(x, y, r)` and stadium `slots`, emitting
-  fully-constrained sketches with true circular arcs.
 - R1.2 the project location is resolved from (in order) the `--project` flag, the
   `FCAD_PROJECT` env var, then the current directory; it may name a directory or a
   `.fcad` file, and a directory holding a sole `.fcad` (and no `project.py`) is
@@ -49,13 +44,21 @@ never regress on them.
   directory, or the file's parent for a `.fcad`. the output stem (`--name`/
   `FCAD_NAME`) defaults to the directory basename, or the `.fcad` file's stem; the
   output dir (`--dist`/`FCAD_DIST`) defaults to `<root>/dist`.
+- R1.3 `fcad.geom_select` provides topology-safe edge and face predicates
+  (`at_x`/`at_y`/`at_z`, `along_axis`, `normal_dir`, `curved`, `straight`,
+  `in_box`, `all_of`, `any_of`, `invert`) for `PartDesign` features and fails
+  loudly on zero or unexpected match counts. `partdesign.add_sketch` supports
+  per-vertex fillet radii `(x, y, r)` and stadium `slots`, emitting
+  fully-constrained sketches with true circular arcs.
 
 ## R2 - build & export (headless)
 
 - R2.1 `build` produces, under `dist/`, for the parts and/or the assembly: the
-  `.FCStd` documents, neutral geometry (STEP, STL), outline SVG, dimensioned DXF,
-  dimensioned TechDraw drawings (DXF), defining-sketch exports (SVG + DXF, parts
-  only), and a CSV bom and cut list (assembly only). every build that runs the
+  `.FCStd` documents, neutral geometry (STEP, STL), dimensioned third-angle
+  multi-view SVG drawing sheets (TOP/FRONT/RIGHT/ISO with hidden lines, extent
+  measurements, hole callouts or assembly BOM, and title block), dimensioned DXF,
+  dimensioned TechDraw drawings (DXF), defining-sketch exports (1:1 SVG + DXF,
+  parts only), and a CSV bom and cut list (assembly only). every build that runs the
   assembly stage also records each part's instance placements in
   `dist/<name>-placements.json`, whatever formats were selected: the 3d diff (R4.4)
   pairs instances across two revisions and cannot obtain the older revision's
@@ -139,6 +142,9 @@ never regress on them.
   from a feature tree (the dimensions are read back out of the bores) and is
   still asserted for a part that supplies its own `solid`, where the circle is
   still named apart from being cut.
+- R3.1.3 a project may declare `CONSTRAINTS`: predicates over its own computed
+  values saying when the model still means what it says. `check` asserts them
+  and reports the ones that broke, by whatever name the predicate gives itself.
 - R3.1.4 a cut that is *meant* to stay empty is not a defect. no geometry
   distinguishes a nut's bore from a lap relieved twice as wide as its crossing
   member, so a project declares which is which (`openings`) and the void
@@ -167,9 +173,6 @@ never regress on them.
 - R3.1.8 an assertion that did not run says `skipped` and why, never `ok`: a
   model with no part flagged `grounded` is not tested for support, and a
   verdict nobody computed must not read as one that passed.
-- R3.1.3 a project may declare `CONSTRAINTS`: predicates over its own computed
-  values saying when the model still means what it says. `check` asserts them
-  and reports the ones that broke, by whatever name the predicate gives itself.
 - R3.1.9 a project declaring `MOTION` (kinematic keyframe sweeps over `PARAMS`)
   is checked across every sampled pose for `CONSTRAINTS` violations, structural
   overlaps, and fastener seating; `build assembly` records per-frame placements
@@ -245,12 +248,13 @@ never regress on them.
   start of a turn, and the sweep amplitude (0 holding the elevation, which makes
   an orbit a turntable).
   the **subject** is `assemble` (the model building itself, each instance flying
-  in from an exploded position to where it belongs) or `static` (the model whole,
-  the camera doing the work). unspecified, it is `assemble` for the assembly and
-  `static` for a single part, which has nothing to assemble; `--subject static`
-  on the assembly must remain available, since orbiting the finished model is a
-  distinct thing to want. `assemble` names a part target is an error, not a
-  silent whole-model animation.
+  in from an exploded position to where it belongs), `static` (the model whole,
+  the camera doing the work), or `motion` (the declared `MOTION` trajectory
+  resampled with position lerp + quaternion SLERP, R3.1.9). unspecified, it is
+  `assemble` for the assembly and `static` for a single part, which has nothing
+  to assemble; `--subject static` on the assembly must remain available, since
+  orbiting the finished model is a distinct thing to want. `assemble` naming a
+  part target is an error, not a silent whole-model animation.
   a clip's length is derived from what it shows, not set: an assembly's follows
   from its part count and how many parts move at once, so twenty arriving singly
   runs far longer than three. `--speed` multiplies that, `--fps` sets the frame
@@ -351,7 +355,8 @@ never regress on them.
   FreeCAD/VTK-free numpy bundle (`<stem>.fem.npz`) holding the boundary
   surface plus per-node von Mises stress and displacement. it runs with no display
   and without VTK. `TARGET` is `assembly` (default) or a part name; the assembly is
-  the structural solids fused into one bonded body (parts flagged `embeds` excluded).
+  the structural solids fused into one bonded body (or a conformal multi-material
+  `CompSolid`, R6.6; parts flagged `embeds` excluded).
   the mesh is second-order: 1st-order tets are over-stiff in bending and understate
   deflection and stress by ~20% at usable mesh sizes, which is a wrong answer rather
   than a coarse one. a solve is reproducible: the same design solved twice gives
