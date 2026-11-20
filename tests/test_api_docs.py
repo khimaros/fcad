@@ -152,9 +152,10 @@ def _skill_checks(root):
         ("... including COTS STEP fixtures",
          os.path.exists(os.path.join(root, "fcad", "examples", "robotarm",
                                      "nema17.step"))),
-        ("... the example's tests included",
-         os.path.exists(os.path.join(root, "fcad", "examples", "fastenplates",
-                                     "tests", "test_lap.py"))),
+        ("... the examples' tests included",
+         all(os.path.exists(os.path.join(root, "fcad", "examples", n,
+                                         "tests", "test_%s.py" % n))
+             for n in ("hexnut", "fastenplates", "cantilever", "robotarm"))),
         ("... and none of their build output",
          not os.path.exists(os.path.join(root, "fcad", "examples",
                                          "fastenplates", "dist"))),

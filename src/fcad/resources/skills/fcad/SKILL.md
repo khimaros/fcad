@@ -772,6 +772,8 @@ the rest of the vocabulary every project's tests turned out to need:
 | `overlap(a, b)` | shared volume of two placed solids, mm^3 |
 | `near(a, b, tol=1e-6)` | `abs(a - b) <= tol`; state `tol` for measured geometry |
 | `Checks()` | `c(name, ok)` records one assertion, `c.report()` writes the verdict |
+| `fem_result(target, solve=False, values=None)` | load a fresh `FemResult` (`max_disp`, `vm_p95`, `vm_p99`, `mode_freqs`, `safety_factor`); refuses missing/stale `.npz` when `solve=False` |
+| `fem_solve(target, values=None)` | returns a fresh `FemResult`, reusing cached `.npz` when fresh or solving in scratch for `values` overrides |
 
 what comes back is an ordinary `Part` solid, so anything these do not cover is
 plain FreeCAD: `solid.BoundBox`, `solid.CenterOfMass`, `solid.Volume`, and

@@ -182,7 +182,11 @@ never regress on them.
   it wrote, never by its exit status or its stdout: `freecadcmd` exits 0 on an
   uncaught exception and discards buffered stdout when it does not, so a runner
   trusting either reports a crash as a pass. a test that writes no verdict at
-  all has failed, and is reported as such rather than skipped.
+  all has failed, and is reported as such rather than skipped. `fcad.testing`
+  provides `fem_result`/`fem_solve` returning a `FemResult` (`max_disp`,
+  `vm_p95`, `vm_p99`, `mode_freqs`, `safety_factor`), refusing stale bundles
+  when `solve=False` and solving parameter overrides in scratch dirs without
+  clobbering `dist/`.
 
 ## R3b - search
 

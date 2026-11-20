@@ -19,10 +19,12 @@ everything else here is the geometry vocabulary those tests turn out to need:
 placed solids, their blanks, extents, and the volume two of them share.
 """
 
+from dataclasses import dataclass
 import os
 import sys
+import tempfile
 
-from fcad import loader
+from fcad import config, loader
 from fcad.project import normalize
 
 # a face-to-face contact leaves an OCC sliver rather than exactly zero, so a
@@ -118,6 +120,114 @@ def overlap(a, b):
 
 def near(a, b, tol=1e-6):
     return abs(a - b) <= tol
+
+
+@dataclass
+class FemResult:
+    """structured summary of a solved FEM target for assertions in `fcad test`."""
+    target: str
+    nodes: int
+    max_disp: float
+    vm_p95: float
+    vm_p99: float
+    vm_max: float
+    mode_freqs: list
+    stale: str
+    raw: dict
+
+    @property
+    def first_mode(self):
+        return self.mode_freqs[0] if self.mode_freqs else None
+
+    def safety_factor(self, yield_mpa, percentile=95):
+        """yield strength divided by percentile von Mises (never singular max)."""
+        stress = self.vm_p99 if int(percentile) == 99 else self.vm_p95
+        return float(yield_mpa) / stress if stress > 0.0 else float("inf")
+
+
+def _to_fem_result(target, data, stale=None):
+    import numpy as np
+    vm = np.asarray(data["von_mises"], dtype=np.float64)
+    disp = np.asarray(data["disp_mag"], dtype=np.float64)
+    p95 = float(data["von_mises_p95"]) if "von_mises_p95" in data else float(
+        np.percentile(vm, 95))
+    p99 = float(data["von_mises_p99"]) if "von_mises_p99" in data else float(
+        np.percentile(vm, 99))
+    freqs = ([float(x) for x in data["mode_freqs"]]
+             if int(data.get("n_modes", 0)) > 0 and "mode_freqs" in data else [])
+    return FemResult(
+        target=str(target),
+        nodes=len(data["nodes"]),
+        max_disp=float(disp.max()) if disp.size else 0.0,
+        vm_p95=p95,
+        vm_p99=p99,
+        vm_max=float(vm.max()) if vm.size else 0.0,
+        mode_freqs=freqs,
+        stale=stale,
+        raw=dict(data),
+    )
+
+
+def _load_project(path=None):
+    cfg = config.resolve(project=path or find())
+    saved = {k: os.environ.get(k) for k in cfg.env()}
+    os.environ.update(cfg.env())
+    try:
+        return loader.load_project()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def fem_result(target="assembly", path=None, solve=False, values=None):
+    """load a fresh FEM result for `target`, optionally solving when missing/stale.
+
+    when `values` is None and a fresh stamped `.npz` already sits in `dist/`,
+    returns it without re-running gmsh/CalculiX. `solve=False` raises
+    `RuntimeError` on missing or stale results rather than silently testing
+    outdated numbers. passing `values` overrides `PARAMS` and solves in a
+    throwaway scratch dir so `dist/` is never overwritten."""
+    import numpy as np
+    from fcad.freecad import dispatch, fem
+
+    project = _load_project(path)
+    npz_path = config.artifact_stem(project.dist, project.name, target,
+                                    config.FEM) + ".npz"
+    if values is None and os.path.exists(npz_path):
+        with np.load(npz_path) as loaded:
+            data = {k: loaded[k] for k in loaded.files}
+        reason = fem.stale_reason(project, data)
+        if reason is None:
+            return _to_fem_result(target, data, stale=None)
+        if not solve:
+            raise RuntimeError(
+                "stale FEM result for %r (%s): %s; run `fcad fem %s` or pass "
+                "solve=True" % (target, npz_path, reason, target))
+    elif not solve:
+        raise RuntimeError(
+            "no FEM result for %r at %s; run `fcad fem %s` or pass solve=True"
+            % (target, npz_path, target))
+
+    if values is None:
+        dispatch.dirs(project)
+        out = fem.solve(project, project.defaults(), target, project.dist)
+        out["source"] = fem.source_stamp(project)
+        np.savez_compressed(npz_path, **out)
+        return _to_fem_result(target, out, stale=None)
+
+    vals = dict(project.defaults(), **values)
+    with tempfile.TemporaryDirectory(prefix="fcad_test_fem_") as tmp:
+        os.makedirs(os.path.join(tmp, config.PARTS_DIR), exist_ok=True)
+        out = fem.solve(project, vals, target, tmp)
+        return _to_fem_result(target, out, stale=None)
+
+
+def fem_solve(target="assembly", values=None, path=None):
+    """get a fresh `FemResult` for `target`, solving automatically if needed."""
+    return fem_result(target=target, path=path, solve=True, values=values)
 
 
 def capture_stderr(fn, limit=4_000_000):
