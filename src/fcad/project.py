@@ -22,7 +22,7 @@ made spec; a project may use its own type as long as it exposes the same surface
 import os
 
 from fcad import config
-from fcad.cutlist import lengths_for
+from fcad.cutlist import lengths_for, sheets_for
 
 DEFAULT_GROUP = "Parameters"
 
@@ -122,13 +122,49 @@ class PartSpec:
     drawing rather than restating their coordinates, and a part with no body says
     `dimension_circles` instead."""
 
-    def __init__(self, name, placements, build=None, solid=None, profile="",
+    def __init__(self, name, placements=None, build=None, solid=None, profile="",
                  length=None, grounded=False, embeds=False,
                  dimension_sketches=(), dimension_circles=(), openings=(),
                  profile2d=None, color=None, transparency=0, disjoint=False,
-                 rides=None):
+                 rides=None, material=None, sheet_size=None, flat_pattern=None,
+                 cots=False, sku="", unit_cost=None, mass_g=None,
+                 bom_group=""):
+        if build is not None and solid is not None:
+            raise ValueError("PartSpec %r: pass either `build` or `solid`, "
+                             "not both" % name)
+        if not (0 <= transparency <= 100):
+            raise ValueError("PartSpec %r: transparency must be in 0..100, "
+                             "got %r" % (name, transparency))
+        if color is not None:
+            col = tuple(color)
+            if len(col) != 3 or not all(
+                    isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and 0.0 <= float(v) <= 1.0 for v in col):
+                raise ValueError("PartSpec %r: color must be an (r, g, b) "
+                                 "triple of 0..1 floats, got %r" % (name, color))
+            color = tuple(float(v) for v in col)
+        if placements is None:
+            try:
+                from FreeCAD import Placement
+                placements = [Placement()]
+            except ImportError:
+                placements = []
+        elif not isinstance(placements, (list, tuple)) \
+                and not hasattr(placements, "__iter__"):
+            placements = [placements]
         self.name = name
         self.disjoint = disjoint
+        # optional per-part FEM material name or {E, nu, rho} dict.
+        self.material = material
+        # optional 2D sheet blank size `(w, h)` and sheet-metal `FlatPattern`.
+        self._sheet_size = tuple(sheet_size) if sheet_size is not None else None
+        self.flat_pattern = flat_pattern
+        # off-the-shelf / vendor STEP metadata and handed-part BOM grouping.
+        self.cots = bool(cots)
+        self.sku = str(sku or "")
+        self.unit_cost = float(unit_cost) if unit_cost is not None else None
+        self._mass_g = mass_g
+        self.bom_group = str(bom_group or "")
         # the part this one stays on when the model is taken apart: a chip on
         # its board, an insert pressed into its boss. the two are one piece to
         # whoever assembles it, and no geometry says so.
@@ -136,7 +172,7 @@ class PartSpec:
         # how `fcad render` draws the part: an (r, g, b) of 0..1 floats, and how
         # see-through it is from 0 (solid) to 100. a look, not a material - it
         # is what lets a crystal show the display under it.
-        self.color = tuple(color) if color is not None else None
+        self.color = color
         self.transparency = transparency
         self.placements = list(placements)
         self._solid = solid           # () -> Part.Shape  (or a Part.Shape)
@@ -165,6 +201,41 @@ class PartSpec:
         # suppressing its own subtractive features and needs none of this.
         self.profile2d = profile2d
 
+    @classmethod
+    def from_step(cls, name, step_path, placements, profile="", sku="",
+                  unit_cost=None, mass_g=None, length=None, grounded=False,
+                  embeds=False, color=None, transparency=0, rides=None,
+                  material=None, bom_group=""):
+        """an off-the-shelf part loaded lazily from a vendor STEP file."""
+        path = os.path.abspath(step_path)
+
+        def _load():
+            if not os.path.exists(path):
+                raise FileNotFoundError("STEP file not found: %s" % path)
+            import Part
+            s = Part.Shape()
+            s.read(path)
+            return s
+
+        return cls(name, placements=placements, solid=_load, profile=profile,
+                   length=length, grounded=grounded, embeds=embeds,
+                   color=color, transparency=transparency, rides=rides,
+                   material=material, cots=True, sku=sku, unit_cost=unit_cost,
+                   mass_g=mass_g, bom_group=bom_group)
+
+    @property
+    def mass_g(self):
+        """explicit mass in grams (float or lazy thunk), or None."""
+        val = self._mass_g() if callable(self._mass_g) else self._mass_g
+        return float(val) if val is not None else None
+
+    def with_placements(self, placements):
+        """shallow copy of this spec carrying a new placements list."""
+        import copy
+        clone = copy.copy(self)
+        clone.placements = list(placements)
+        return clone
+
     @property
     def qty(self):
         return len(self.placements)
@@ -192,6 +263,16 @@ class PartSpec:
         return self._solid() if callable(self._solid) else self._solid
 
     @property
+    def sheet_dims(self):
+        """2D blank `(w, h)` for sheet nesting: explicit, else from flat_pattern."""
+        if self._sheet_size is not None:
+            return (float(self._sheet_size[0]), float(self._sheet_size[1]))
+        fp = self.flat_pattern() if callable(self.flat_pattern) else self.flat_pattern
+        if fp is not None:
+            return (float(fp.width), float(fp.height))
+        return None
+
+    @property
     def length(self):
         """bom length: the explicit value, else the solid's x-extent.
 
@@ -209,6 +290,53 @@ class PartSpec:
 Part = PartSpec
 
 
+class SubAssembly:
+    """a reusable multi-part module placed at one or more assembly transforms.
+
+    placing a sub-assembly multiplies each child part's local placement by the
+    module's placement and merges repeated child names so the BOM and part files
+    stay deduplicated."""
+
+    def __init__(self, name, specs):
+        self.name = name
+        self.specs = list(specs)
+
+    def place(self, placements):
+        """realize this sub-assembly at every transform in `placements`."""
+        pls = list(placements)
+        out = []
+        for spec in self.specs:
+            combined = [pl.multiply(child_pl)
+                        for pl in pls for child_pl in spec.placements]
+            out.append(spec.with_placements(combined))
+        return out
+
+
+def compose(*items):
+    """flatten PartSpecs, lists, and placed SubAssemblies, merging shared names."""
+    by_name, order = {}, []
+
+    def add(item):
+        if isinstance(item, SubAssembly):
+            for s in item.specs:
+                add(s)
+        elif isinstance(item, (list, tuple)):
+            for sub in item:
+                add(sub)
+        else:
+            if item.name in by_name:
+                prev = by_name[item.name]
+                by_name[item.name] = prev.with_placements(
+                    prev.placements + list(item.placements))
+            else:
+                order.append(item.name)
+                by_name[item.name] = item
+
+    for it in items:
+        add(it)
+    return [by_name[n] for n in order]
+
+
 class Project:
     """adapts a project's declarations to the surface the instrumentation reads.
 
@@ -220,7 +348,7 @@ class Project:
     def __init__(self, name, root=None, params=None, schema=None, compute=None,
                  from_spec=None, profile=None, enum_choices=None, fem=None,
                  param_meta=None, material=None, materials=None, stock=None,
-                 constraints=None, assemble=None, dist=None):
+                 constraints=None, assemble=None, motion=None, dist=None):
         self.name = name              # output stem: <name>.FCStd, <name>-bom.csv
         self.root = root or os.getcwd()   # project root; dist/ is created under it
         self._dist = dist             # explicit output dir; else env, else root/dist
@@ -250,6 +378,9 @@ class Project:
         # that declares it owns the jointing, so a hinge can be a Revolute
         # instead of the Fixed joint computed placements imply.
         self.assemble = assemble
+        # optional kinematic motion sweeps (`[{"name": ..., "keyframes": [...]}]`)
+        # checked dynamically by `fcad check` and animated by `--subject motion`.
+        self.motion = motion
 
     def violations(self, values, computed=None):
         """which constraints this parameter set breaks, as printable strings.
@@ -288,9 +419,19 @@ class Project:
             return self._dist
         return os.environ.get(config.ENV_DIST) or os.path.join(self.root, "dist")
 
-    def stock_for(self, profile):
-        """stock lengths declared for a bom profile; [] means not cut from stock."""
-        return lengths_for(self.stock, profile)
+    def resolve_stock(self, values=None):
+        """stock table for `values`, calling `self.stock(values)` when callable."""
+        if callable(self.stock):
+            return self.stock(self.defaults() if values is None else values)
+        return self.stock
+
+    def stock_for(self, profile, values=None):
+        """stock lengths declared for a 1D bom profile; [] means not 1D stock."""
+        return lengths_for(self.resolve_stock(values), profile)
+
+    def sheets_for(self, profile, values=None):
+        """2D buyable `Sheet` stock declared for a bom profile, or []."""
+        return sheets_for(self.resolve_stock(values), profile)
 
     def defaults(self):
         return dict(self.params)

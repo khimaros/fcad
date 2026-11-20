@@ -815,6 +815,37 @@ ahead of it landing. the ones that can stop a working project say so.
   `fastener_holes` stay yours: their real geometry is a stepped tool, not the
   circle drawn on the sketch.
 
+- **robotic arm example (`examples/robotarm/`) and six new capabilities:**
+  - `fcad.geom_select` selects PartDesign edges and faces by geometric predicate
+    (`at_z`, `along_axis`, `normal_dir`, `curved`, `straight`, `all_of`, ...)
+    and raises on unexpected counts; `partdesign.add_sketch` accepts per-vertex
+    corner radii `(x, y, r)` and stadium `slots` while staying fully constrained.
+  - `MOTION` declares kinematic keyframe sweeps: `fcad check` validates
+    constraints, overlaps, and seating across every sampled pose, `build`
+    writes `dist/<name>-motion.json`, and `fcad animate --subject motion`
+    renders the moving mechanism.
+  - per-part `PartSpec(..., material=...)` builds a conformal multi-material
+    `CompSolid` for assembly FEM (with optional `ties`), `FEM` cases accept
+    `"target"` + `"params"` for multi-pose solves, and `fem-animate` decimates
+    dense boundary meshes automatically.
+  - `fcad.Sheet(w, h, price=...)` in `STOCK` enables 2D guillotine sheet nesting
+    (`dist/<name>-sheetlist.csv`), and `fcad.sheetmetal` unfolds bent housings
+    into `dist/sketches/<part>-flat.svg` with dashed bend lines.
+  - `PartSpec.from_step` imports COTS vendor STEP parts (`sku`, `unit_cost`,
+    `mass_g`), `fcad.SubAssembly` + `fcad.compose` reuse multi-part modules,
+    and `bom_group` groups asymmetrically drilled handed twins.
+  - `fcad optimize` adds `--objective price` (1D + 2D stock + COTS costs) and
+    `--objective mass` (and warns when swept stock parts omit `length=`);
+    TechDraw drawings carry `PartDesign::Hole` callouts (`THRU`, `CBORE`,
+    `CSINK`, `THREADED`) and an assembly BOM table.
+  - contract ergonomics (zero wrapper over FreeCAD's object model): `PartSpec`
+    defaults `placements` to `[Placement()]`, coerces a single `Placement`, and
+    validates `build`/`solid`, `color`, and `transparency` up front; `STOCK` and
+    FEM load `magnitude` accept callables `(values) -> ...`; `pad_and_bore`
+    defaults `name` to `body.Name`; `openings` and `dimension_sketches` accept
+    fnmatch globs (`*_bore*`); `build_assembly.joint` and `fix_remaining` remove
+    `JointObject`/`sys.path` boilerplate from `ASSEMBLE`.
+
 ## architecture
 
 see [DESIGN.md](DESIGN.md) for how one package drives three interpreters, and

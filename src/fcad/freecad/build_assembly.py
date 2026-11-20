@@ -13,7 +13,7 @@ import sys
 import FreeCAD as App
 import Part
 
-from fcad import cutlist
+from fcad import config, cutlist, motion
 from fcad.freecad import util as fcutil
 
 # the built-in Assembly workbench ships its python modules here.
@@ -94,6 +94,46 @@ def whole_of(asm, obj):
     fcad can avoid it: the placements are already computed, so a joint has
     nothing to solve and needs no geometry to mate to."""
     return [asm, [obj.Name + ".", obj.Name + "."]]
+
+
+def _joint_module():
+    """import FreeCAD's bundled Assembly `JointObject` module once."""
+    if ASSEMBLY_MOD not in sys.path:
+        sys.path.insert(0, ASSEMBLY_MOD)
+    import JointObject
+    return JointObject
+
+
+def joint(doc, asm, name, kind, a, b):
+    """create and return a real FreeCAD Assembly joint of type `kind` between
+    components `a` and `b`, without manual `sys.path` or `JointObject` plumbing."""
+    mod = _joint_module()
+    joints = doc.getObject("Joints")
+    j = joints.newObject("App::FeaturePython", name)
+    mod.Joint(j, joint_type(mod, kind))
+    j.Reference1 = whole_of(asm, a)
+    j.Reference2 = whole_of(asm, b)
+    return j
+
+
+def fix_remaining(doc, asm, links, datum, exclude=()):
+    """Fixed-joint every component in `links` not yet grounded or jointed."""
+    mod = _joint_module()
+    joints = doc.getObject("Joints")
+    constrained = {datum.Name} | {getattr(o, "Name", o) for o in exclude}
+    for o in doc.Objects:
+        g = getattr(o, "ObjectToGround", None)
+        if g is not None:
+            constrained.add(g.Name)
+        for prop in ("Reference1", "Reference2"):
+            ref = getattr(o, prop, None)
+            if ref and len(ref) == 2:
+                for el in ref[1]:
+                    constrained.add(el.split(".")[0])
+    all_links = ([l for grp in links.values() for l in grp]
+                 if isinstance(links, dict) else list(links))
+    rest = [l for l in all_links if l.Name not in constrained]
+    fix_to_datum(mod, asm, joints, datum, rest)
 
 
 def fix_to_datum(module, asm, joints, datum, links):
@@ -187,6 +227,61 @@ def void_baseline(project, spec):
             dia / 2.0, thickness + 2 * BORE_OVERSHOOT,
             V(cx, cy, -thickness / 2.0 - BORE_OVERSHOOT)))
     return blank
+
+
+def target_regions(project, values, target, undrilled=False):
+    """(shape, regions) for a FEM target.
+
+    when an assembly's structural parts declare more than one distinct material,
+    builds a conformal `Part.CompSolid` via `generalFuse` (so touching faces
+    share mesh nodes across parts) and returns `regions = [(material_key,
+    ["SolidN", ...]), ...]`. for single-material assemblies and single parts,
+    returns `(target_shape(...), None)` so existing behavior is unchanged."""
+    if target not in ("assembly", project.name):
+        return target_shape(project, values, target, undrilled=undrilled), None
+    specs = project.compute(values)["specs"]
+    default_mat = getattr(project, "material", None)
+    build = (lambda s: blank_shape(project, s)) if undrilled else project.from_spec
+    items = []
+    for spec in specs:
+        if getattr(spec, "embeds", False):
+            continue
+        mat = getattr(spec, "material", None) or default_mat
+        base = build(spec)
+        for pl in spec.placements:
+            s = base.copy()
+            s.Placement = pl
+            items.append((mat, s))
+    if not items:
+        return None, None
+    keys = {repr(m) for m, _ in items if m is not None}
+    if len(keys) < 2:
+        return target_shape(project, values, target, undrilled=undrilled), None
+    solids = [s for _, s in items]
+    fused, mapping = solids[0].generalFuse(solids[1:])
+    cs = Part.CompSolid(fused.Solids)
+    # map each output solid in `cs.Solids` back to its originating material.
+    out_solids = list(cs.Solids)
+    by_mat = {}
+    assigned = set()
+    for (mat, _), produced in zip(items, mapping):
+        mkey = repr(mat)
+        for p in produced:
+            for ps in getattr(p, "Solids", [p]):
+                for idx, os_ in enumerate(out_solids):
+                    if idx not in assigned and os_.isSame(ps):
+                        assigned.add(idx)
+                        by_mat.setdefault(mkey, (mat, []))[1].append(
+                            "Solid%d" % (idx + 1))
+                        break
+    # fallback for any solid not matched by `isSame` (center-of-mass containment).
+    for idx, os_ in enumerate(out_solids):
+        if idx in assigned:
+            continue
+        c = os_.CenterOfMass
+        mat = next((m for m, s in items if s.isInside(c, 1e-3, True)), items[0][0])
+        by_mat.setdefault(repr(mat), (mat, []))[1].append("Solid%d" % (idx + 1))
+    return cs, list(by_mat.values())
 
 
 def target_shape(project, values, target, undrilled=False):
@@ -358,7 +453,8 @@ def find_disjoint(project, values, model=None):
     model = model or Model(project, values)
     seen, bad = set(), []
     for _, spec, solid in model.structural + model.embedded:
-        if spec.name in seen or getattr(spec, "disjoint", False):
+        if (spec.name in seen or getattr(spec, "disjoint", False)
+                or getattr(spec, "cots", False)):
             continue
         seen.add(spec.name)
         n = len(solid.Solids)
@@ -407,7 +503,7 @@ def measure_voids(project, values, model=None):
     model = model or Model(project, values)
     seen, sizes = set(), []
     for name, spec, solid in model.structural:
-        if spec.name in seen:
+        if spec.name in seen or getattr(spec, "cots", False):
             continue
         seen.add(spec.name)
         blank = model.baseline(spec, solid.Placement)
@@ -512,6 +608,27 @@ def find_undrilled(project, values, model=None):
     return bad
 
 
+def find_motion_issues(project, values):
+    """validate constraints, structural overlaps, and fastener seating across
+    every pose sampled from `project.motion`.
+
+    returns `(n_poses, issues)` where each issue is `(pose_label, reason)`."""
+    poses = list(motion.samples(project, values))
+    if not poses:
+        return 0, []
+    issues = []
+    for label, posed in poses:
+        for why in project.violations(posed):
+            issues.append((label, "constraint: " + why))
+        model = Model(project, posed)
+        for a, b, vol in find_overlaps(project, posed, model=model):
+            issues.append((label, "overlap %s <-> %s (%s)"
+                           % (a, b, fmt_vol(vol))))
+        for inst, reason, detail in find_unseated(project, posed, model=model):
+            issues.append((label, "%s %s (%s)" % (inst, reason, detail)))
+    return len(poses), issues
+
+
 def find_unconstrained(path):
     """assembly components (App::Links) that are neither grounded nor used by
     any joint. reads the built assembly file so it validates the real artifact."""
@@ -534,12 +651,25 @@ def find_unconstrained(path):
 
 
 def write_bom(specs, path):
+    extras = [
+        ("bom_group", lambda s: getattr(s, "bom_group", "")),
+        ("sku", lambda s: getattr(s, "sku", "")),
+        ("unit_cost", lambda s: getattr(s, "unit_cost", None)),
+        ("mass_g", lambda s: getattr(s, "mass_g", None)),
+    ]
+    used = [(col, fn) for col, fn in extras
+            if any(fn(s) not in (None, "") for s in specs)]
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["part", "qty", "profile", "length_mm"])
+        w.writerow(["part", "qty", "profile", "length_mm"]
+                   + [col for col, _ in used])
         for spec in specs:
-            w.writerow([spec.name, len(spec.placements),
-                        getattr(spec, "profile", ""), round(spec.length, 1)])
+            row = [spec.name, len(spec.placements),
+                   getattr(spec, "profile", ""), round(spec.length, 1)]
+            for _, fn in used:
+                val = fn(spec)
+                row.append("" if val is None else val)
+            w.writerow(row)
 
 
 def profile_demand(specs):
@@ -555,16 +685,32 @@ def profile_demand(specs):
     return demand
 
 
-def write_cutlist(project, specs, path):
-    """pack each profile's bom rows into the stock lengths declared for it.
+def sheet_demand(specs):
+    """{bom profile: {(w, h): qty}} for parts declaring 2D sheet dimensions."""
+    demand = {}
+    for spec in specs:
+        prof = getattr(spec, "profile", "")
+        dims = getattr(spec, "sheet_dims", None)
+        if not prof or dims is None:
+            continue
+        key = (round(dims[0], 1), round(dims[1], 1))
+        rows_ = demand.setdefault(prof, {})
+        rows_[key] = rows_.get(key, 0) + len(spec.placements)
+    return demand
+
+
+def write_cutlist(project, specs, path, values=None):
+    """pack each 1D profile into stock lengths and each 2D profile onto sheets.
 
     a profile with no stock (fasteners, bought parts) is not cut from stock and
     is simply absent from the plan."""
     opts = cutlist.options_from_env()
     override = opts.pop("stock")
+    stock = project.resolve_stock(values)
     out = []
     for prof, demand in profile_demand(specs).items():
-        lengths = cutlist.resolve_lengths(project.stock_for(prof), override, prof)
+        lengths = cutlist.resolve_lengths(project.stock_for(prof, values),
+                                          override, prof)
         if not lengths:
             continue
         plan = cutlist.plan(demand, lengths, **opts)
@@ -577,12 +723,52 @@ def write_cutlist(project, specs, path):
     for prof, plan in out:
         for line in cutlist.summary(prof, plan):
             print(line)
-    if not out:
-        return                # nothing is cut from stock, so nothing to total
-    # per-profile lines answer "how do I cut the 2x6"; nobody's shopping list is
-    # one profile, so say what the whole model costs to buy.
-    prices = {prof: cutlist.prices_for(project.stock, prof) for prof, _ in out}
-    for line in cutlist.totals(dict(out), prices):
+
+    # 2D sheet stock nesting (written beside cutlist as <name>-sheetlist.csv).
+    sheet_out = []
+    for prof, demand in sheet_demand(specs).items():
+        sheets = project.sheets_for(prof, values)
+        if not sheets:
+            continue
+        splan = cutlist.plan_sheets(demand, sheets, kerf=opts["kerf"],
+                                    trim=opts["trim"])
+        sheet_out.append((prof, splan))
+    if sheet_out:
+        sheet_path = path.replace("-cutlist.csv", "-sheetlist.csv")
+        with open(sheet_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(cutlist.SHEET_CSV_HEADER)
+            for prof, splan in sheet_out:
+                w.writerows(cutlist.sheet_rows(prof, splan))
+        for prof, splan in sheet_out:
+            for line in cutlist.sheet_summary(prof, splan):
+                print(line)
+
+    if not out and not sheet_out:
+        return
+    if out:
+        prices = {prof: cutlist.prices_for(stock, prof) for prof, _ in out}
+        for line in cutlist.totals(dict(out), prices):
+            print(line)
+    if sheet_out:
+        n_sh = sum(p.sheet_count for _, p in sheet_out)
+        area = sum(p.bought_area for _, p in sheet_out)
+        waste = sum(p.waste_area for _, p in sheet_out)
+        pct = 100.0 * waste / area if area else 0.0
+        money = 0.0
+        priced = True
+        for prof, splan in sheet_out:
+            ptab = cutlist.sheet_prices_for(stock, prof)
+            for sh in splan.sheets:
+                k = (float(sh.stock_w), float(sh.stock_h))
+                if k in ptab:
+                    money += ptab[k] * sh.count
+                else:
+                    priced = False
+        line = "  sheets total: %d sheet(s), %.0f cm^2 purchased (%.1f%% waste)" % (
+            n_sh, area / 100.0, pct)
+        if priced and money:
+            line += ", %.2f to buy" % money
         print(line)
 
 
@@ -683,12 +869,16 @@ def build(project, values, dirs, formats):
     # and the two per-part flags no renderer can infer from geometry: the anchor,
     # and which parts are fasteners. the assembly animator sequences on both.
     fcutil.export_parts(specs, fcutil.parts_path(dirs["dist"], project.name))
+    if getattr(project, "motion", None):
+        motion.export_motion(project, values,
+                             config.motion_path(dirs["dist"], project.name))
 
     if "bom" in formats:
         write_bom(specs, os.path.join(dirs["dist"], project.name + "-bom.csv"))
     if "cutlist" in formats:
         write_cutlist(project, specs,
-                      os.path.join(dirs["dist"], project.name + "-cutlist.csv"))
+                      os.path.join(dirs["dist"], project.name + "-cutlist.csv"),
+                      values=values)
     clock.lap("lists")
 
     neutral = formats & {"step", "stl", "svg", "dxf", "drawing"}
@@ -715,7 +905,7 @@ def build(project, values, dirs, formats):
         if "drawing" in formats:
             fcutil.make_drawing(doc, [obj],
                                 os.path.join(dirs["drawings"], "assembly.dxf"),
-                                ASM_VIEWS,
+                                ASM_VIEWS, bom=specs,
                                 title={"part": "assembly", "project": project.name})
             clock.lap("drawing")
         App.closeDocument(doc.Name)

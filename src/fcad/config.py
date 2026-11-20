@@ -39,6 +39,7 @@ PLACEMENTS_SUFFIX = "-placements.json"
 # `{part: [placement]}`, the 3d diff reads it, and a top-level key that is not a
 # part name would be a trap for both.
 PARTS_SUFFIX = "-parts.json"
+MOTION_SUFFIX = "-motion.json"
 
 
 def placements_path(dist, name):
@@ -49,11 +50,15 @@ def parts_path(dist, name):
     return os.path.join(dist, name + PARTS_SUFFIX)
 
 
+def motion_path(dist, name):
+    return os.path.join(dist, name + MOTION_SUFFIX)
+
+
 ASSEMBLY = "assembly"         # the target that is the whole model
 PARTS_DIR = "parts"
 DOC_EXT = ".FCStd"
 # what is made *from* a target, beyond the exports of it.
-ASSEMBLE, SPIN, FEM, DIFF = "assemble", "spin", "fem", "diff"
+ASSEMBLE, SPIN, MOTION, FEM, DIFF = "assemble", "spin", "motion", "fem", "diff"
 
 
 def is_assembly(name, target):

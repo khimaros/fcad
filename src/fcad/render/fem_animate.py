@@ -93,6 +93,15 @@ def animate(target="assembly", stem=None, name=None, dist=None,
     clip = lambda *a, **kw: _clip(*a, frames=frames, fps=fps, **kw)
     data = np.load(fem_render.npz_path(target, name, dist))
     nodes, tris = data["nodes"], data["tris"]
+    vm, disp = data["von_mises"], data["disp"]
+    has_modes = int(data["n_modes"]) > 0
+    mode_disp = data["mode_disp"] if has_modes else None
+    if len(tris) > fem_render.MAX_ANIM_TRIS:
+        if has_modes:
+            nodes, tris, vm, disp, mode_disp = fem_render.decimate(
+                nodes, tris, vm, disp, mode_disp)
+        else:
+            nodes, tris, vm, disp = fem_render.decimate(nodes, tris, vm, disp)
     stem = stem or config.artifact_stem(dist, name, target, config.FEM)
     written = []
 
@@ -102,9 +111,9 @@ def animate(target="assembly", stem=None, name=None, dist=None,
     if subject in ("all", "flex", "static"):
         scale = fem_render.deform_scale(data)
         cycles = 0 if subject == "static" else CYCLES
-        vmax, note = fem_render.stress_scale(data, data["von_mises"])
+        vmax, note = fem_render.stress_scale(data, vm)
         motion = "held" if not cycles else "flex"
-        written.append(clip(nodes, tris, data["von_mises"], data["disp"], scale,
+        written.append(clip(nodes, tris, vm, disp, scale,
                             "%s  %s (x%.0f)  %s" % (target, motion, scale, note),
                             stem, "von Mises (MPa)", vmax=vmax, camera=camera,
                             cycles=cycles))
@@ -114,7 +123,7 @@ def animate(target="assembly", stem=None, name=None, dist=None,
     if subject in ("all", "modes"):
         bbox = float(data["bbox_diag"])
         for k in range(int(data["n_modes"])):
-            md = data["mode_disp"][k]
+            md = mode_disp[k]
             mag = np.linalg.norm(md, axis=1).astype(np.float32)
             peak = float(mag.max()) or 1.0
             amp = fem_render.DEFORM_FRAC * bbox / peak

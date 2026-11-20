@@ -7,6 +7,7 @@ for meshes. runs under plain python (numpy + matplotlib), so name/dist are passe
 in (defaulting from the environment for standalone use).
 """
 
+import math
 import os
 import sys
 
@@ -27,6 +28,57 @@ CMAP = "viridis"
 DEFORM_FRAC = float(os.environ.get("FCAD_FEM_DEFORM", 0.08))
 VMAX_ENV = "FCAD_FEM_VMAX"
 CLAMP_KEY = "von_mises_p99"
+MAX_ANIM_TRIS = int(os.environ.get("FCAD_FEM_MAX_TRIS", 8000))
+
+
+def _cluster_at(nodes, tris, cell):
+    """quantize nodes onto a `cell`-mm grid; return (inv_map, kept_tris, n_cells)."""
+    lo = nodes.min(axis=0)
+    keys = np.floor((nodes - lo) / max(cell, 1e-6)).astype(np.int64)
+    _, inv = np.unique(keys, axis=0, return_inverse=True)
+    remapped = inv[tris]
+    valid = ((remapped[:, 0] != remapped[:, 1])
+             & (remapped[:, 1] != remapped[:, 2])
+             & (remapped[:, 0] != remapped[:, 2]))
+    return inv, remapped[valid], int(inv.max()) + 1
+
+
+def decimate(nodes, tris, *fields, max_tris=MAX_ANIM_TRIS):
+    """vertex-cluster a dense FEM boundary mesh while carrying per-node fields.
+
+    returns `(nodes, tris, *fields)` unchanged when `len(tris) <= max_tris`.
+    each field may have shape `(N,)`, `(N, 3)`, or `(K, N, 3)` (mode shapes)."""
+    if len(tris) <= max_tris or len(nodes) == 0:
+        return (nodes, tris) + fields
+    span = float(np.ptp(nodes, axis=0).max()) or 1.0
+    # start from an estimate proportional to sqrt(len(tris) / max_tris) and grow.
+    cell = span / max(2.0, math.sqrt(max_tris))
+    inv, dtris, n_cells = _cluster_at(nodes, tris, cell)
+    for _ in range(12):
+        if len(dtris) <= max_tris:
+            break
+        cell *= 1.35
+        inv, dtris, n_cells = _cluster_at(nodes, tris, cell)
+    counts = np.bincount(inv, minlength=n_cells).astype(np.float32)
+    counts[counts == 0] = 1.0
+
+    def avg(arr):
+        if arr.ndim == 1:
+            acc = np.zeros(n_cells, dtype=np.float32)
+            np.add.at(acc, inv, arr)
+            return acc / counts
+        if arr.ndim == 2:
+            acc = np.zeros((n_cells, arr.shape[1]), dtype=np.float32)
+            np.add.at(acc, inv, arr)
+            return acc / counts[:, None]
+        # 3D mode shapes: (n_modes, n_nodes, 3)
+        out = np.zeros((arr.shape[0], n_cells, arr.shape[2]), dtype=np.float32)
+        for k in range(arr.shape[0]):
+            np.add.at(out[k], inv, arr[k])
+            out[k] /= counts[:, None]
+        return out
+
+    return (avg(nodes), dtris.astype(np.int32)) + tuple(avg(f) for f in fields)
 
 
 def npz_path(target, name, dist):

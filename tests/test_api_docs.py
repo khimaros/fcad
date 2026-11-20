@@ -148,7 +148,10 @@ def _skill_checks(root):
         # SKILL.md sends its reader to these by name, so they have to be there.
         ("the fcad skill ships the examples it points at",
          all(os.path.exists(os.path.join(root, "fcad", "examples", n, n + ".fcad"))
-             for n in ("hexnut", "fastenplates", "cantilever"))),
+             for n in ("hexnut", "fastenplates", "cantilever", "robotarm"))),
+        ("... including COTS STEP fixtures",
+         os.path.exists(os.path.join(root, "fcad", "examples", "robotarm",
+                                     "nema17.step"))),
         ("... the example's tests included",
          os.path.exists(os.path.join(root, "fcad", "examples", "fastenplates",
                                      "tests", "test_lap.py"))),

@@ -9,34 +9,18 @@ feature tree is there to edit.
 nothing here describes the part twice. the bore is a Hole feature, so fcad reads
 it back out of the tree rather than being told about it separately - that is what
 `dimension_sketches` means: not "there is a 20 mm circle at the origin" but "the
-circles in *that* sketch belong on the drawing". a dimension cannot disagree with
-a bore it was read from.
-
-`openings` is the one thing the geometry cannot say. `check` asks whether a part
-gave up material nothing fills, which is the right question for a lap cut twice
-as wide as the member crossing it and the wrong one for a nut - the hole is the
-point. both are just a feature that removed material, so the project says which
-is which.
-
-`pad_and_bore` is the shape most parts are, offered as a helper to call from
-`build`. it is not a layer: it makes the same calls this file could make inline,
-and the screw in `fastenplates` ignores it entirely.
-
-the sketch lies in XY at z = -thickness/2, so a circle in it is already a
-vertical bore. the outline is centered on the origin by construction rather than
-translated, so the assembly's placement cannot shift the part.
+circles in matching sketches belong on the drawing". `openings` says which cuts
+are meant to stay empty, and accepts glob patterns (`*_bore*`) while still
+failing `check` if a pattern matches no cut.
 """
 
 import math
-
-# `Placement` is FreeCAD's own: it imports by name because a .fcad is executed
-# inside FreeCAD, and fcad injects nothing into a project's namespace.
-from FreeCAD import Placement
 
 import fcad
 from fcad.freecad import partdesign
 
 SIDES = 6
+COL_STEEL = (0.68, 0.71, 0.75)
 
 PARAMS = {"across_flats": 75.0, "thickness": 30.0, "hole_dia": 20.0}
 
@@ -50,12 +34,12 @@ def _outline(across_flats):
 def _hex(doc, body, across_flats, thickness, hole_dia):
     """the outline padded, with one bore through the middle."""
     partdesign.pad_and_bore(doc, body, _outline(across_flats), thickness,
-                            [(0.0, 0.0, hole_dia)], name="hex")
+                            [(0.0, 0.0, hole_dia)])
 
 
 def compute(p):
     af, t, d = p["across_flats"], p["thickness"], p["hole_dia"]
-    return [fcad.PartSpec("hex", placements=[Placement()],
+    return [fcad.PartSpec("hex", length=af, color=COL_STEEL,
                           build=lambda doc, body: _hex(doc, body, af, t, d),
-                          dimension_sketches=["hex_bore1"],
-                          openings=["hex_bore1"])]
+                          dimension_sketches=["*_bore*"],
+                          openings=["*_bore*"])]

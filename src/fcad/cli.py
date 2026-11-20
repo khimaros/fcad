@@ -55,7 +55,7 @@ EXPLODE_GAP = 1.0               # the gap when the flag is given without one
 # absorbed, and the example projects (sources only, never their build output).
 SKILL_DOCS = (README_NAME, "CONTRIBUTING.md")
 EXAMPLES_NAME = "examples"
-EXAMPLE_SUFFIXES = (".fcad", ".py")
+EXAMPLE_SUFFIXES = (".fcad", ".py", ".step")
 EXAMPLE_SKIP = ("dist", "__pycache__")
 PKG_ROOT = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.expanduser("~/.claude/skills")
@@ -124,8 +124,9 @@ def _build_parser():
                         % OPTIMIZE_LIMIT)
     o.add_argument("--kerf", type=float, help="cutlist saw kerf")
     o.add_argument("--trim", type=float, help="cutlist trim allowance")
-    o.add_argument("--objective", choices=["length", "boards"],
-                   help="cutlist goal for each candidate's plan")
+    o.add_argument("--objective", choices=["length", "boards", "price", "mass"],
+                   help="optimization goal: length, boards, price (1D+2D+COTS), "
+                        "or mass (grams)")
 
     v = sub.add_parser("view", help="open the assembly (or 'view parts') in the gui")
     v.add_argument("what", nargs="?", choices=["parts"], metavar="[parts]")

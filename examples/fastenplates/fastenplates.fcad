@@ -3,117 +3,69 @@
 
 both plates are the *same* part placed twice, the second rotated 180 degrees
 about Z, so a single drilled sketch serves both ends of the lap and the bom reads
-one row of qty 2. nothing is flagged `grounded`, so fcad anchors the first
-instance and Fixed-joints the rest - which is what a model of computed
-placements means, and all this one needs. a lap held by a single screw is
-physically a pivot, so a project that wanted it to swing would declare
-`assemble` and joint the plates with a `Revolute` instead; see the skill.
+one row of qty 2. `plate` is flagged `grounded`, so `check` runs its full
+support assertion rather than skipping it.
 
 both parts are PartDesign bodies, and both come from a `build` that is handed a
-live document and an empty body. the **plate calls the helper**:
-`partdesign.pad_and_bore` pads an outline and bores it, which is the shape most
-parts are. the **screw writes the FreeCAD calls itself**: it is turned, which no
-outline describes, so it makes a `PartDesign::Revolution` out of a half-section.
-fcad has no vocabulary in the way - a Revolution is not a thing fcad knows
-about - and the result is as real and as editable as the plate.
+live document and an empty body. the plate calls `partdesign.pad_and_bore`; the
+screw writes plain FreeCAD calls itself (`PartDesign::Revolution` of a
+half-section). fcad has no vocabulary in the way, so general FreeCAD Python
+knowledge applies directly.
 
-reach for the helper when it fits and for your own calls when it does not;
-`solid=` remains for geometry that is not a body at all.
-
-the screw sinks into both plates, so `embeds` is what keeps the interference
-check (and the FEM fuse) from calling that a collision. drop the flag and `check`
-fails on both plates. the flag does not end the argument, though: it hands the
-screw to the seating check instead, which asks whether it sits in a hole bored
-for it. so the plates are drilled to the shank's own diameter -- a screw driven
-into undrilled wood, or turned across its own bore, is caught there. the screw
-also needs an explicit `length`, since the bom would otherwise take its bbox
-x-extent, which for a screw standing on Z is the head diameter. the plate's bore
-is listed in `openings` (it is meant to stay empty of plate) but not in
-`dimension_sketches`, so it is in the part and left off the dimensioned drawing.
-
-all geometry is centered by construction rather than translated, so the
-assembly's placements cannot shift a part.
-
-`STOCK` says what the plate is cut from, which is what gives `fcad build
-cutlist` anything to plan: a profile absent from it is not cut from stock at all,
-which is how the screw stays off the shopping list. `CONSTRAINTS` says when this
-is still a lap joint, and is what makes `fcad optimize plate_len overlap` safe -
-shorter plates are always cheaper, and the cheapest of all is a joint that spans
-nothing.
+`STOCK` is a callable `(p) -> dict`, so sweeping `plate_wid` or `plate_thk`
+still matches `plate`'s bom profile instead of going stale on import-time
+defaults. `CONSTRAINTS` stops `fcad optimize plate_len overlap` from shrinking
+the joint below its stated reach.
 """
 
-# FreeCAD's own names: they import this way because a .fcad is executed inside
-# FreeCAD, and fcad injects nothing into a project's namespace.
 from FreeCAD import Placement, Rotation, Vector
 
 import fcad
 from fcad import types
 from fcad.freecad import partdesign
 
-# the screw's proportions, as multiples of its nominal diameter: a pan head, and
-# the bore the plates are drilled to - the shank's own diameter, so the shank
-# occupies the hole instead of displacing plate.
 HEAD_DIA = 2.0
 HEAD_THK = 0.7
 BORE = 1.0
-
-# plate left around the bore, as multiples of the screw diameter: less than this
-# and the hole is breaking out of the lap.
 MIN_MARGIN = 1.0
+COL_PLATE = (0.72, 0.75, 0.79)
+COL_SCREW = (0.32, 0.35, 0.40)
 
 PARAMS = {"plate_len": 100.0, "plate_wid": 40.0, "plate_thk": 10.0,
-          "overlap": 40.0, "screw_dia": 6.0,
-          # what the finished joint has to reach end to end. an asked-for value
-          # rather than a dimension: the geometry achieves it or it does not.
-          "reach": 160.0}
+          "overlap": 40.0, "screw_dia": 6.0, "reach": 160.0}
 
 
 def _section(width, thickness):
-    """the bom label for the plate's cross-section.
-
-    also how `STOCK` is keyed, so the two are one expression: a stock dict whose
-    key has drifted from the bom label plans nothing at all, silently."""
     return "bar %gx%g" % (width, thickness)
 
 
-# buyable bar, as (length, price). only a profile named here is planned, so the
-# screw - a bought part, not a cut one - is left out.
-STOCK = {_section(PARAMS["plate_wid"], PARAMS["plate_thk"]):
-         [(200.0, 4.50), (300.0, 6.00)]}
+# reactive stock catalog: keyed off live parameters, so sweeping plate_wid or
+# plate_thk still plans the right bar. the screw stays off the shopping list.
+STOCK = lambda p: {
+    _section(p["plate_wid"], p["plate_thk"]): [(200.0, 4.50), (300.0, 6.00)],
+}
 
-# a sweep will always find that a smaller model buys less material. these are
-# what stop it selling the joint to pay for the saving.
 CONSTRAINTS = [
     lambda p, d: (d["reach"] >= p["reach"]
-                  or "the joint only reaches %.0f mm of %.0f" % (d["reach"],
-                                                                 p["reach"])),
+                  or "the joint only reaches %.0f mm of %.0f"
+                  % (d["reach"], p["reach"])),
     lambda p, d: (d["lap_margin"] >= MIN_MARGIN * p["screw_dia"]
-                  or "only %.1f mm of plate around the screw" % d["lap_margin"]),
+                  or "only %.1f mm of plate around the screw"
+                  % d["lap_margin"]),
 ]
 
 
 def _outline(length, width):
-    """the closed rectangle footprint, centered on the origin."""
     l, w = length / 2.0, width / 2.0
     return [(-l, -w), (l, -w), (l, w), (-l, w)]
 
 
 def _plate(doc, body, points, thickness, bore):
-    """an outline padded, with the screw's bore through it."""
-    partdesign.pad_and_bore(doc, body, points, thickness, [bore], name="plate")
+    partdesign.pad_and_bore(doc, body, points, thickness, [bore])
 
 
 def _screw(doc, body, dia, grip):
-    """the screw's half-section, turned about Z - which is what a turned part is.
-
-    head above z = 0 with the shank hanging below, so the part's origin is the
-    face the head bears on and one placement seats it on the top plate. the
-    profile is (radius, z) pairs closed back along the axis at radius 0, which is
-    what a revolution needs.
-
-    this is plain FreeCAD code: fcad passes the document and an empty body and
-    has no opinion about what goes in them. `add_sketch` is a convenience for the
-    constraints - `check` requires a fully-constrained sketch - not a layer."""
+    """the screw's half-section revolved 360 deg about Z in plain FreeCAD."""
     sr, hr, ht = dia / 2.0, dia * HEAD_DIA / 2.0, dia * HEAD_THK
     profile = [(0.0, ht), (hr, ht), (hr, 0.0), (sr, 0.0), (sr, -grip), (0.0, -grip)]
     sketch = partdesign.add_sketch(
@@ -129,33 +81,24 @@ def _screw(doc, body, dia, grip):
 def compute(p):
     l, w, t = p["plate_len"], p["plate_wid"], p["plate_thk"]
     ov, d = p["overlap"], p["screw_dia"]
-    off = (l - ov) / 2.0          # plate center to the center of the lap
-    grip = 2.0 * t                # the screw spans both plates
+    off = (l - ov) / 2.0
+    grip = 2.0 * t
     hole = (off, 0.0, d * BORE)
     points = _outline(l, w)
     specs = [
-        # the commonest shape, via the helper: an outline padded with a bore
-        # through it. the bore is an opening - the screw passes through, and
-        # nothing is meant to fill the clearance - but it is not dimensioned,
-        # since a fastener hole belongs on the sketch and not on the drawing.
         fcad.PartSpec("plate", profile=_section(w, t), length=l,
+                      grounded=True, color=COL_PLATE,
                       placements=[
                           Placement(Vector(-off, 0, -t / 2.0), Rotation()),
                           Placement(Vector(off, 0, t / 2.0),
                                     Rotation(Vector(0, 0, 1), 180))],
                       build=lambda doc, body: _plate(doc, body, points, t, hole),
-                      openings=["plate_bore1"]),
-        # and the general form: an outline with holes cannot describe a turned
-        # screw, so this one writes the FreeCAD calls itself and gets a body
-        # just as real as the plate's.
-        fcad.PartSpec("screw", profile="m%g screw" % d,
-                      placements=[Placement(Vector(0, 0, t), Rotation())],
-                      build=lambda doc, body: _screw(doc, body, d, grip),
-                      length=grip, embeds=True),
+                      openings=["*_bore*"]),
+        fcad.PartSpec("screw", profile="m%g screw" % d, length=grip,
+                      placements=Placement(Vector(0, 0, t), Rotation()),
+                      embeds=True, color=COL_SCREW,
+                      build=lambda doc, body: _screw(doc, body, d, grip)),
     ]
-    # the dict form of a compute return: derived values ride alongside the specs,
-    # which is what CONSTRAINTS reads. both are things the geometry *achieves*
-    # rather than things it is told, so neither can be asserted from PARAMS.
     return {"specs": specs,
-            "reach": 2.0 * l - ov,          # the joint end to end
-            "lap_margin": (ov - d) / 2.0}   # plate between the bore and the lap end
+            "reach": 2.0 * l - ov,
+            "lap_margin": (ov - d) / 2.0}

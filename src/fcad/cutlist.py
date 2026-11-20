@@ -43,6 +43,64 @@ ENV_OBJECTIVE = "FCAD_CUT_OBJECTIVE"
 
 CSV_HEADER = ["profile", "pattern", "stock_mm", "boards",
               "cut_mm", "per_board", "offcut_mm"]
+SHEET_CSV_HEADER = ["profile", "sheet", "stock_w_mm", "stock_h_mm",
+                    "x_mm", "y_mm", "piece_w_mm", "piece_h_mm", "rotated"]
+
+
+@dataclass
+class Sheet:
+    """one buyable 2D sheet stock size (width x height in mm, optional price)."""
+    w: float
+    h: float
+    price: float = None
+
+
+@dataclass
+class Placement2D:
+    x: float
+    y: float
+    w: float
+    h: float
+    rotated: bool = False
+
+
+@dataclass
+class SheetLayout:
+    stock_w: float
+    stock_h: float
+    placements: list = field(default_factory=list)
+    waste_area: float = 0.0
+    count: int = 1
+
+
+@dataclass
+class SheetPlan:
+    sheets: list = field(default_factory=list)
+    demand: dict = field(default_factory=dict)
+    unpacked: dict = field(default_factory=dict)
+    kerf: float = DEFAULT_KERF
+    trim: float = DEFAULT_TRIM
+
+    @property
+    def sheet_count(self):
+        return sum(s.count for s in self.sheets)
+
+    @property
+    def bought_area(self):
+        return sum(s.stock_w * s.stock_h * s.count for s in self.sheets)
+
+    @property
+    def cut_area(self):
+        return sum(w * h * q for (w, h), q in self.demand.items()
+                   if (w, h) not in self.unpacked)
+
+    @property
+    def waste_area(self):
+        return self.bought_area - self.cut_area
+
+    @property
+    def waste_pct(self):
+        return 100.0 * self.waste_area / self.bought_area if self.bought_area else 0.0
 
 
 @dataclass
@@ -297,6 +355,39 @@ def parse_stock(text):
     return plain
 
 
+def _is_sheet_entry(entry):
+    return isinstance(entry, Sheet) or (
+        isinstance(entry, dict) and "w" in entry and "h" in entry)
+
+
+def _as_sheet(entry):
+    if isinstance(entry, Sheet):
+        return entry
+    return Sheet(float(entry["w"]), float(entry["h"]),
+                 float(entry["price"]) if entry.get("price") is not None else None)
+
+
+def is_sheet_stock(stock, profile):
+    entries = _entries_for(stock, profile)
+    return bool(entries) and all(_is_sheet_entry(e) for e in entries)
+
+
+def sheets_for(stock, profile):
+    """buyable `Sheet` entries for a 2D sheet profile, or [] for 1D/unlisted."""
+    entries = _entries_for(stock, profile)
+    if not entries or not all(_is_sheet_entry(e) for e in entries):
+        return []
+    return [_as_sheet(e) for e in entries]
+
+
+def sheet_prices_for(stock, profile):
+    out = {}
+    for s in sheets_for(stock, profile):
+        if s.price is not None:
+            out[(float(s.w), float(s.h))] = float(s.price)
+    return out
+
+
 def _length_of(entry):
     """a stock entry's length, whether or not it carries a price.
 
@@ -313,12 +404,132 @@ def _price_of(entry):
 
 
 def lengths_for(stock, profile):
-    """stock lengths declared for one bom profile.
+    """stock lengths declared for one 1D bom profile (empty for 2D sheets)."""
+    entries = _entries_for(stock, profile)
+    if not entries or any(_is_sheet_entry(e) for e in entries):
+        return []
+    return [_length_of(e) for e in entries]
 
-    a dict is looked up by profile name, with "*" as the catch-all entry; a bare
-    list applies to every profile. prices, where an entry carries one, are
-    stripped here: everything downstream plans on lengths."""
-    return [_length_of(e) for e in _entries_for(stock, profile)]
+
+def _guillotine_pack(pieces, stock_w, stock_h, kerf, trim, rotate):
+    """pack as many `(w, h)` pieces as fit into one sheet via guillotine splits.
+
+    returns `(placements, remaining_pieces)`."""
+    cap_w, cap_h = stock_w - 2.0 * trim, stock_h - 2.0 * trim
+    free = [(trim, trim, cap_w, cap_h)]
+    placed, rem = [], []
+    for pw, ph in pieces:
+        best = None
+        for idx, (fx, fy, fw, fh) in enumerate(free):
+            orients = [(pw, ph, False)]
+            if rotate and abs(pw - ph) > EPS:
+                orients.append((ph, pw, True))
+            for ow, oh, rot in orients:
+                if ow <= fw + EPS and oh <= fh + EPS:
+                    score = (min(fw - ow, fh - oh), fw * fh - ow * oh)
+                    if best is None or score < best[0]:
+                        best = (score, idx, fx, fy, fw, fh, ow, oh, rot)
+        if best is None:
+            rem.append((pw, ph))
+            continue
+        _, idx, fx, fy, fw, fh, ow, oh, rot = best
+        free.pop(idx)
+        placed.append(Placement2D(fx, fy, ow, oh, rot))
+        # split leftover area along the shorter leftover edge to keep large boxes.
+        rw = fw - ow - kerf
+        th = fh - oh - kerf
+        if rw > EPS and th > EPS:
+            if rw >= th:
+                free.append((fx + ow + kerf, fy, rw, fh))
+                free.append((fx, fy + oh + kerf, ow, th))
+            else:
+                free.append((fx, fy + oh + kerf, fw, th))
+                free.append((fx + ow + kerf, fy, rw, oh))
+        elif rw > EPS:
+            free.append((fx + ow + kerf, fy, rw, fh))
+        elif th > EPS:
+            free.append((fx, fy + oh + kerf, fw, th))
+    return placed, rem
+
+
+def plan_sheets(demand, sheets, kerf=DEFAULT_KERF, trim=DEFAULT_TRIM,
+                rotate=True):
+    """pack 2D rectangular pieces `{(w, h): qty}` onto buyable `Sheet` stock."""
+    items = demand.items() if isinstance(demand, dict) else demand
+    norm = {}
+    for (w, h), qty in items:
+        if qty > 0:
+            key = (round(float(w), 3), round(float(h), 3))
+            norm[key] = norm.get(key, 0) + int(qty)
+    catalog = sorted((_as_sheet(s) for s in sheets), key=lambda s: s.w * s.h)
+    if not catalog:
+        return SheetPlan(demand=norm, unpacked=dict(norm), kerf=kerf, trim=trim)
+
+    def fits_any(pw, ph):
+        for s in catalog:
+            cw, ch = s.w - 2.0 * trim, s.h - 2.0 * trim
+            if (pw <= cw + EPS and ph <= ch + EPS) or (
+                    rotate and ph <= cw + EPS and pw <= ch + EPS):
+                return True
+        return False
+
+    unpacked = {k: q for k, q in norm.items() if not fits_any(*k)}
+    pieces = []
+    for (w, h), q in sorted(norm.items(),
+                            key=lambda kv: (max(kv[0]), kv[0][0] * kv[0][1]),
+                            reverse=True):
+        if (w, h) not in unpacked:
+            pieces.extend([(w, h)] * q)
+
+    layouts = []
+    while pieces:
+        best = None
+        for s in catalog:
+            placed, rem = _guillotine_pack(pieces, s.w, s.h, kerf, trim, rotate)
+            if not placed:
+                continue
+            used = sum(p.w * p.h for p in placed)
+            waste = s.w * s.h - used
+            # prefer completing all remaining pieces on the smallest sheet, else
+            # highest utilization per sheet.
+            done = 0 if not rem else 1
+            key = (done, s.w * s.h if not rem else waste / (s.w * s.h), s.w * s.h)
+            if best is None or key < best[0]:
+                best = (key, s, placed, rem, waste)
+        if best is None:
+            break
+        _, s, placed, pieces, waste = best
+        layouts.append(SheetLayout(s.w, s.h, placed, waste, 1))
+    return SheetPlan(layouts, norm, unpacked, kerf, trim)
+
+
+def sheet_rows(profile, splan):
+    out = []
+    for i, sh in enumerate(splan.sheets, 1):
+        for p in sh.placements:
+            out.append([profile, i, round(sh.stock_w, 1), round(sh.stock_h, 1),
+                        round(p.x, 1), round(p.y, 1), round(p.w, 1),
+                        round(p.h, 1), "yes" if p.rotated else "no"])
+    return out
+
+
+def sheet_summary(profile, splan):
+    buy = {}
+    for sh in splan.sheets:
+        k = (sh.stock_w, sh.stock_h)
+        buy[k] = buy.get(k, 0) + sh.count
+    lines = []
+    if buy:
+        lines.append("  %s: buy %s mm = %d sheet(s), %.1f%% waste"
+                     % (profile,
+                        " + ".join("%d x %gx%g" % (n, w, h)
+                                   for (w, h), n in sorted(buy.items(),
+                                                           reverse=True)),
+                        splan.sheet_count, splan.waste_pct))
+    for (w, h), qty in sorted(splan.unpacked.items(), reverse=True):
+        lines.append("  %s: WARNING %d x %gx%g mm exceeds every stock sheet"
+                     % (profile, qty, w, h))
+    return lines
 
 
 def _entries_for(stock, profile):

@@ -17,7 +17,7 @@ neither.
 
 CAMERAS = ("orbit", "turntable", "fixed")
 SUBJECTS = ("all", "flex", "static", "modes")
-MESH_SUBJECTS = ("static", "assemble")
+MESH_SUBJECTS = ("static", "assemble", "motion")
 ORDERS = ("grounded", "bottom-up", "top-down", "declared")
 # the still renderer's vocabulary. it is drawn by the FreeCAD gui rather than by
 # anything in this package, but the cli names its choices the same way.

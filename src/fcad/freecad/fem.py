@@ -145,18 +145,12 @@ def _card_properties(name):
     return None
 
 
-def _material(doc, analysis, case, project=None):
-    """attach the solid material: a named FreeCAD card (proper, full FEM
-    properties) or an explicit {E, nu, rho} dict for materials the library lacks.
-
-    a name is resolved against the project's own `materials` registry first, then
-    fcad's built-in aliases. the case wins; absent one, the project-wide
-    `material` default; absent that, steel (the frozen fallback)."""
+def _add_material(doc, analysis, spec, project, name="Material", refs=None):
     table = dict(MATERIALS, **(getattr(project, "materials", None) or {}))
     default = getattr(project, "material", None) or DEFAULT_CARD
-    spec = _get(case, "material", default)
+    spec = default if spec is None else spec
     spec = table.get(spec.lower(), spec) if isinstance(spec, str) else spec
-    mat = ObjectsFem.makeMaterialSolid(doc, "Material")
+    mat = ObjectsFem.makeMaterialSolid(doc, name)
     m = mat.Material
     if isinstance(spec, str):
         props = _card_properties(spec) or _card_properties(DEFAULT_CARD)
@@ -168,25 +162,52 @@ def _material(doc, analysis, case, project=None):
         m["PoissonRatio"] = str(spec["nu"])
         m["Density"] = "%s kg/m^3" % spec["rho"]
     mat.Material = m
+    if refs:
+        mat.References = refs
     analysis.addObject(mat)
 
 
-def _constraints(doc, analysis, case, obj, infos):
+def _material(doc, analysis, case, project=None, obj=None, regions=None):
+    """attach one material for a monolithic target, or one per region on a
+    multi-material CompSolid assembly."""
+    if regions and obj is not None:
+        for i, (spec, solid_names) in enumerate(regions, 1):
+            _add_material(doc, analysis, spec, project,
+                          name="Material_%d" % i,
+                          refs=[(obj, tuple(solid_names))])
+        return
+    default = getattr(project, "material", None) or DEFAULT_CARD
+    spec = _get(case, "material", default)
+    _add_material(doc, analysis, spec, project)
+
+
+def _constraints(doc, analysis, case, obj, infos, values=None):
     """add the fixed/support, load and self-weight constraints described by the
     case.
 
     returns the [(force constraint, direction)] pairs `_run` must re-assert."""
     supports = _get(case, "supports", []) or []
-    for sel in _get(case, "fixed", [] if supports else [fs.min_along("z")]):
+    fixed = _get(case, "fixed", [] if supports else [fs.min_along("z")])
+    if callable(fixed):
+        fixed = fixed(values)
+    for sel in fixed:
         c = ObjectsFem.makeConstraintFixed(doc, "Fixed")
         c.References = _refs(sel, infos, obj)
         analysis.addObject(c)
     for sup in supports:
         _support(doc, analysis, sup, obj, infos)
+    for i, tie in enumerate(_get(case, "ties", []) or [], 1):
+        t = ObjectsFem.makeConstraintTie(doc, "Tie_%d" % i)
+        t.References = (_refs(_get(tie, "master"), infos, obj)
+                        + _refs(_get(tie, "slave"), infos, obj))
+        t.Tolerance = "%g mm" % float(_get(tie, "tolerance", 1.0))
+        analysis.addObject(t)
     loads = _get(case, "loads", []) or []
+    if callable(loads):
+        loads = loads(values)
     directions = []
     for load in loads:
-        c, vec = _load(doc, load, obj, infos)
+        c, vec = _load(doc, load, obj, infos, values=values)
         analysis.addObject(c)
         if vec is not None:
             directions.append((c, vec))
@@ -218,11 +239,15 @@ def _support(doc, analysis, sup, obj, infos):
     analysis.addObject(c)
 
 
-def _load(doc, load, obj, infos):
+def _load(doc, load, obj, infos, values=None):
     """(constraint, direction to re-assert later) for one declared load; a
-    pressure acts along its face's normal by definition, so it has no direction."""
+    pressure acts along its face's normal by definition, so it has no direction.
+
+    `magnitude` may be a number or a callable `(values) -> float` so static FEM
+    dicts stay reactive to VarSet edits and multi-pose `params` overrides."""
     refs = _refs(_get(load, "faces"), infos, obj)
-    mag = float(_get(load, "magnitude", 0.0))
+    raw_mag = _get(load, "magnitude", 0.0)
+    mag = float(raw_mag(values) if callable(raw_mag) else raw_mag)
     if _get(load, "kind", "force") == "pressure":
         c = ObjectsFem.makeConstraintPressure(doc, "Pressure")
         c.References = refs
@@ -508,14 +533,15 @@ def _workdir():
             shutil.rmtree(path, ignore_errors=True)
 
 
-def _undrilled(project, target):
-    """does this target's case ask for the geometry without its drilled holes?
-
-    read from the mapping before the shape exists, since it decides which shape
-    to build; a callable `fem` descriptor is handed the shape and so cannot
-    answer this."""
+def _raw_case(project, target):
+    """static dict case for `target` (or `__default__`) before geometry exists."""
     fem = project.fem
-    case = fem.get(target) if isinstance(fem, dict) else None
+    return fem.get(target, fem.get("__default__")) if isinstance(fem, dict) else None
+
+
+def _undrilled(project, target):
+    """does this target's case ask for the geometry without its drilled holes?"""
+    case = _raw_case(project, target)
     return bool(_get(case, "undrilled", False)) if case is not None else False
 
 
@@ -600,12 +626,17 @@ def check_gravity(project, values, target, case):
 
 
 def _solve(project, values, target, dist, work):
-    shape = build_assembly.target_shape(project, values, target,
-                                        undrilled=_undrilled(project, target))
+    raw = _raw_case(project, target)
+    geo_target = _get(raw, "target", target) if raw is not None else target
+    overrides = _get(raw, "params", None) if raw is not None else None
+    case_values = dict(values, **overrides) if overrides else values
+    shape, regions = build_assembly.target_regions(
+        project, case_values, geo_target,
+        undrilled=_undrilled(project, target))
     if shape is None:
         raise SystemExit("fcad fem: no such target %r" % target)
-    case = _resolve_case(project, target, shape, values)
-    complaint = check_gravity(project, values, target, case)
+    case = _resolve_case(project, target, shape, case_values)
+    complaint = check_gravity(project, case_values, geo_target, case)
     if complaint:
         print(complaint)
     infos = _face_infos(shape)
@@ -618,8 +649,9 @@ def _solve(project, values, target, dist, work):
     analysis = ObjectsFem.makeAnalysis(doc, "Analysis")
     solver = ObjectsFem.makeSolverCalculiXCcxTools(doc, "Solver")
     analysis.addObject(solver)
-    _material(doc, analysis, case, project)
-    directions = _constraints(doc, analysis, case, obj, infos)
+    _material(doc, analysis, case, project, obj=obj, regions=regions)
+    directions = _constraints(doc, analysis, case, obj, infos,
+                              values=case_values)
     mesh = ObjectsFem.makeMeshGmsh(doc, "FEMMesh")
     mesh.Shape = obj
     # set before GmshTools is built: it only mkdtemps a directory of its own when

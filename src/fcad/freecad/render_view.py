@@ -311,12 +311,39 @@ def _look(cam, box, elev, azim, reach):
     cam.farDistance.setValue(3.0 * reach)
 
 
+def _film_motion(items, objs, cam, gview, plan, width, height):
+    """draw kinematic motion frames where each frame supplies absolute placements."""
+    by_part = {}
+    for (part, _), obj in zip(items, objs):
+        by_part.setdefault(part, []).append(obj)
+    # compute union bbox over the swept motion envelope so nothing clips.
+    frames = plan["frames"]
+    box = _bbox(items)
+    for _, _, posed in frames:
+        for part, grp in by_part.items():
+            pls = posed.get(part) or ()
+            for obj, (pos, quat) in zip(grp, pls):
+                obj.Placement = App.Placement(V(*pos), App.Rotation(*quat))
+                box.add(obj.Shape.BoundBox)
+    reach = box.DiagonalLength
+    for n, (elev, azim, posed) in enumerate(frames):
+        for part, grp in by_part.items():
+            pls = posed.get(part) or ()
+            for obj, (pos, quat) in zip(grp, pls):
+                obj.Placement = App.Placement(V(*pos), App.Rotation(*quat))
+        _look(cam, box, elev, azim, reach)
+        gview.saveImage(plan["shots"] % n, width, height, BACKGROUND)
+        if (n + 1) % FILM_REPORT == 0:
+            sys.__stdout__.write("  drawn %d/%d\n" % (n + 1, len(frames)))
+            sys.__stdout__.flush()
+
+
 def film(cfg):
     """draw every frame of the clip `fcad animate` planned, one png each.
 
     the plan (see fcad.render.animate) says where the camera is on each frame
-    and how much of its starting offset each moving instance still has to
-    cover; an instance it does not name stays where the build put it."""
+    and either how far out each moving instance still sits (assemble mode) or
+    every instance's absolute placement (motion mode)."""
     with open(os.environ["FCAD_RENDER_PLAN"]) as f:
         plan = json.load(f)
     items = instances(cfg, plan["target"])
@@ -327,20 +354,23 @@ def film(cfg):
         items, _load_json(config.parts_path(cfg.dist, cfg.name)))
     gview.setCameraType("Orthographic")
     cam, box = gview.getCameraNode(), _bbox(items)
-    movers = _movers(items, objs, plan)
-    reach = box.DiagonalLength + max(
-        [off.Length for _, _, off, _ in movers], default=0.0)
     width, height = _size(plan["size"], FILM_SIZE)
     frames = plan["frames"]
-    for n, (elev, azim, away) in enumerate(frames):
-        for obj, home, off, col in movers:
-            obj.Placement = App.Placement(home.Base + off * away[col],
-                                          home.Rotation)
-        _look(cam, box, elev, azim, reach)
-        gview.saveImage(plan["shots"] % n, width, height, BACKGROUND)
-        if (n + 1) % FILM_REPORT == 0:
-            sys.__stdout__.write("  drawn %d/%d\n" % (n + 1, len(frames)))
-            sys.__stdout__.flush()
+    if plan.get("mode") == "motion":
+        _film_motion(items, objs, cam, gview, plan, width, height)
+    else:
+        movers = _movers(items, objs, plan)
+        reach = box.DiagonalLength + max(
+            [off.Length for _, _, off, _ in movers], default=0.0)
+        for n, (elev, azim, away) in enumerate(frames):
+            for obj, home, off, col in movers:
+                obj.Placement = App.Placement(home.Base + off * away[col],
+                                              home.Rotation)
+            _look(cam, box, elev, azim, reach)
+            gview.saveImage(plan["shots"] % n, width, height, BACKGROUND)
+            if (n + 1) % FILM_REPORT == 0:
+                sys.__stdout__.write("  drawn %d/%d\n" % (n + 1, len(frames)))
+                sys.__stdout__.flush()
     App.closeDocument(doc.Name)
     return "drew %d frame(s) of %s (%d instance(s))" % (
         len(frames), plan["target"], len(items))

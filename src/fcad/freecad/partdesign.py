@@ -25,6 +25,8 @@ pays once per part and the bom, cut list and `optimize` never pay at all (they
 read metadata).
 """
 
+import fnmatch
+import math
 import os
 
 import FreeCAD as App
@@ -52,53 +54,163 @@ CONSOLE_KINDS = ("Wrn", "Err")
 INERT_TOL = 1e-9
 
 
+def _arc_ccw(cx, cy, r, a0, a1):
+    """a `Part.ArcOfCircle` sweeping CCW from angle `a0` to `a1` (rad)."""
+    while a1 <= a0:
+        a1 += 2.0 * math.pi
+    return Part.ArcOfCircle(Part.Circle(V(cx, cy, 0), V(0, 0, 1), r), a0, a1)
+
+
+def _fillet_corner(prev_pt, pt, next_pt, radius):
+    """(t1, t2, center, arc, left_turn) for a corner rounded to `radius`."""
+    px, py = pt[0], pt[1]
+    u1x, u1y = prev_pt[0] - px, prev_pt[1] - py
+    u2x, u2y = next_pt[0] - px, next_pt[1] - py
+    l1, l2 = math.hypot(u1x, u1y), math.hypot(u2x, u2y)
+    b1x, b1y = u1x / l1, u1y / l1
+    b2x, b2y = u2x / l2, u2y / l2
+    dot = max(-1.0, min(1.0, b1x * b2x + b1y * b2y))
+    half = 0.5 * math.acos(dot)
+    d_tan = radius / math.tan(half)
+    d_cen = radius / math.sin(half)
+    bx, by = b1x + b2x, b1y + b2y
+    bl = math.hypot(bx, by)
+    cx, cy = px + (bx / bl) * d_cen, py + (by / bl) * d_cen
+    t1 = (px + b1x * d_tan, py + b1y * d_tan)
+    t2 = (px + b2x * d_tan, py + b2y * d_tan)
+    # cross of incoming direction (-b1) and outgoing direction (b2).
+    left = (-b1x) * b2y - (-b1y) * b2x > 0.0
+    a1 = math.atan2(t1[1] - cy, t1[0] - cx)
+    a2 = math.atan2(t2[1] - cy, t2[0] - cx)
+    arc = _arc_ccw(cx, cy, radius, a1, a2) if left else _arc_ccw(cx, cy, radius, a2, a1)
+    return t1, t2, (cx, cy), arc, left
+
+
 def _loop(points, first):
-    """(segments, constraints) of one closed polygon, every vertex pinned in x
-    and y. `first` is the sketch index its first segment will have."""
+    """(geometry, constraints) of one closed polygon, fully constrained.
+
+    vertices are `(x, y)` for sharp corners or `(x, y, r)` for a tangent circular
+    fillet of radius `r` at that vertex. sharp and rounded corners may mix freely;
+    total constraints equal raw DOF in every combination."""
     n = len(points)
-    segments = [Part.LineSegment(V(points[i][0], points[i][1], 0),
-                                 V(points[(i + 1) % n][0], points[(i + 1) % n][1], 0))
-                for i in range(n)]
-    pins = [Sketcher.Constraint("Coincident", first + i, 2,
-                                first + (i + 1) % n, 1) for i in range(n)]
+    radii = [float(p[2]) if len(p) > 2 else 0.0 for p in points]
+    if not any(r > 0.0 for r in radii):
+        segments = [Part.LineSegment(V(points[i][0], points[i][1], 0),
+                                     V(points[(i + 1) % n][0],
+                                       points[(i + 1) % n][1], 0))
+                    for i in range(n)]
+        pins = [Sketcher.Constraint("Coincident", first + i, 2,
+                                    first + (i + 1) % n, 1) for i in range(n)]
+        for i in range(n):
+            pins.append(Sketcher.Constraint("DistanceX", first + i, 1,
+                                            float(points[i][0])))
+            pins.append(Sketcher.Constraint("DistanceY", first + i, 1,
+                                            float(points[i][1])))
+        return segments, pins
+
+    corners = []
     for i in range(n):
-        pins.append(Sketcher.Constraint("DistanceX", first + i, 1,
-                                        float(points[i][0])))
-        pins.append(Sketcher.Constraint("DistanceY", first + i, 1,
-                                        float(points[i][1])))
-    return segments, pins
+        if radii[i] > 0.0:
+            corners.append(_fillet_corner(points[(i - 1) % n], points[i],
+                                          points[(i + 1) % n], radii[i]))
+        else:
+            p = (float(points[i][0]), float(points[i][1]))
+            corners.append((p, p, None, None, None))
+
+    geom, pins, seg_idx, arc_idx = [], [], [], {}
+    for i in range(n):
+        s_pt = corners[i][1]
+        e_pt = corners[(i + 1) % n][0]
+        seg_idx.append(first + len(geom))
+        geom.append(Part.LineSegment(V(s_pt[0], s_pt[1], 0),
+                                     V(e_pt[0], e_pt[1], 0)))
+        nxt = (i + 1) % n
+        if radii[nxt] > 0.0:
+            arc_idx[nxt] = first + len(geom)
+            geom.append(corners[nxt][3])
+
+    for i in range(n):
+        prev_seg = seg_idx[(i - 1) % n]
+        next_seg = seg_idx[i]
+        if radii[i] > 0.0:
+            ai = arc_idx[i]
+            _, _, (cx, cy), _, left = corners[i]
+            in_end, out_end = (1, 2) if left else (2, 1)
+            pins.append(Sketcher.Constraint("DistanceX", ai, 3, float(cx)))
+            pins.append(Sketcher.Constraint("DistanceY", ai, 3, float(cy)))
+            pins.append(Sketcher.Constraint("Radius", ai, radii[i]))
+            pins.append(Sketcher.Constraint("Tangent", prev_seg, 2, ai, in_end))
+            pins.append(Sketcher.Constraint("Tangent", ai, out_end, next_seg, 1))
+        else:
+            pins.append(Sketcher.Constraint("Coincident", prev_seg, 2, next_seg, 1))
+            pins.append(Sketcher.Constraint("DistanceX", next_seg, 1,
+                                            float(points[i][0])))
+            pins.append(Sketcher.Constraint("DistanceY", next_seg, 1,
+                                            float(points[i][1])))
+    return geom, pins
+
+
+def _slot(x1, y1, x2, y2, width, first):
+    """(geometry, constraints) of one fully-constrained stadium slot at any angle."""
+    r = float(width) / 2.0
+    dx, dy = float(x2) - float(x1), float(y2) - float(y1)
+    ang = math.atan2(dy, dx)
+    nx, ny = -math.sin(ang) * r, math.cos(ang) * r
+    p1t, p1b = V(x1 + nx, y1 + ny, 0), V(x1 - nx, y1 - ny, 0)
+    p2t, p2b = V(x2 + nx, y2 + ny, 0), V(x2 - nx, y2 - ny, 0)
+
+    arc1 = _arc_ccw(x1, y1, r, ang + math.pi / 2.0, ang + 1.5 * math.pi)
+    line1 = Part.LineSegment(p1b, p2b)
+    arc2 = _arc_ccw(x2, y2, r, ang - math.pi / 2.0, ang + math.pi / 2.0)
+    line2 = Part.LineSegment(p2t, p1t)
+
+    a1, l1, a2, l2 = first, first + 1, first + 2, first + 3
+    pins = [
+        Sketcher.Constraint("DistanceX", a1, 3, float(x1)),
+        Sketcher.Constraint("DistanceY", a1, 3, float(y1)),
+        Sketcher.Constraint("Radius", a1, r),
+        Sketcher.Constraint("DistanceX", a2, 3, float(x2)),
+        Sketcher.Constraint("DistanceY", a2, 3, float(y2)),
+        Sketcher.Constraint("Radius", a2, r),
+        Sketcher.Constraint("Tangent", a1, 2, l1, 1),
+        Sketcher.Constraint("Tangent", l1, 2, a2, 1),
+        Sketcher.Constraint("Tangent", a2, 2, l2, 1),
+        Sketcher.Constraint("Tangent", l2, 2, a1, 1),
+    ]
+    return [arc1, line1, arc2, line2], pins
 
 
 def add_sketch(doc, owner, name, points=(), circles=(), z=0.0, placement=None,
-               loops=()):
+               loops=(), slots=()):
     """a fully-constrained sketch: parallel to XY at `z`, or wherever `placement`
     puts it (an axial profile for a revolution wants XZ). `placement` wins when
     both are given.
 
-    `points` is the outline, `loops` further closed polygons and `circles`
-    `(cx, cy, dia)` triples, all in the sketch's own xy. they combine: a loop or
-    circle inside the outline is a hole in the face a Pad extrudes, so a window,
-    a ring or a frame is one sketch and one feature, with no Pocket to aim.
+    `points` is the outline, `loops` further closed polygons (vertices `(x, y)` or
+    `(x, y, r)` for a tangent corner fillet), `circles` `(cx, cy, dia)` triples,
+    and `slots` `(x1, y1, x2, y2, width)` stadium cutouts, all in the sketch's
+    own xy. they combine: any inner loop, circle or slot inside the outline is a
+    hole in the face a Pad extrudes, with no Pocket to aim.
 
     `owner` is a `PartDesign::Body` for a declared part, or the document itself
     for the outline sketch of a part that hands over its own solid - the only
     difference is which call makes the object.
 
-    every vertex is pinned with DistanceX/Y and every circle by its centre and a
-    diameter, leaving zero degrees of freedom: `check` fails a part file whose
-    sketches are loose, and a sketch nobody constrained is a drawing rather than
-    a definition. a project wanting arcs, splines or constraints between elements
-    writes Sketcher calls directly - this covers the common case, not the API.
+    every element is pinned with zero leftover degrees of freedom: `check` fails
+    a part file whose sketches are loose.
 
     the geometry and the constraints each go in as one list. a sketch re-solves
-    on every `addConstraint`, so adding them singly is quadratic in the sketch:
-    forty islands took 35 seconds that way and take a fraction of one this way."""
+    on every `addConstraint`, so adding them singly is quadratic in the sketch."""
     make = owner.newObject if hasattr(owner, "newObject") else owner.addObject
     sketch = make(types.Sketcher.SketchObject, name)
     sketch.Placement = placement or App.Placement(V(0, 0, z), App.Rotation())
     geometry, pins = [], []
     for loop in ([points] if len(points) else []) + list(loops):
         segments, held = _loop(loop, len(geometry))
+        geometry += segments
+        pins += held
+    for x1, y1, x2, y2, width in slots:
+        segments, held = _slot(x1, y1, x2, y2, width, len(geometry))
         geometry += segments
         pins += held
     for cx, cy, dia in circles:
@@ -137,13 +249,13 @@ def add_text(doc, body, name, text, size, font=None, placement=None):
     return obj
 
 
-def pad_and_bore(doc, body, points, thickness, holes=(), name="part"):
+def pad_and_bore(doc, body, points, thickness, holes=(), name=None):
     """the shape most parts are: an outline padded, with through bores.
 
     the bores are `PartDesign::Hole` features rather than pockets or booleans,
     because a Hole is the only one that records that it *is* a hole - through or
     blind, counterbored, threaded to a standard - which is the intent a finished
-    shape throws away.
+    shape throws away. `name` defaults to `body.Name`.
 
     two orderings here are not stylistic. a feature's properties can only be set
     once it has a base ("No base set, no sketch support either"), and its base
@@ -151,6 +263,7 @@ def pad_and_bore(doc, body, points, thickness, holes=(), name="part"):
     invalid"). and the bores are `Reversed` because their sketch sits on the -Z
     face: unreversed the cut runs away from the material, succeeds, reports
     up-to-date, and removes nothing at all."""
+    name = name or body.Name
     outline = add_sketch(doc, body, name + "_sketch", points=points,
                          z=-thickness / 2.0)
     pad = body.newObject(types.PartDesign.Pad, name + "_pad")
@@ -215,22 +328,64 @@ def inert_features(doc, tol=INERT_TOL):
     return found
 
 
-def circles_of(doc, names=()):
-    """(cx, cy, dia) for every circle in the named sketches, in part coordinates.
+def _matches(name, patterns):
+    """whether `name` matches any exact name or fnmatch glob in `patterns`."""
+    if not name:
+        return False
+    return any(name == p or fnmatch.fnmatchcase(name, p) for p in patterns)
 
-    the drawing dimensions what a part declares, and a part built from a feature
-    tree has already said it: the bore is a circle in a sketch. reading them here
-    means the dimensions cannot disagree with the geometry, because they are the
-    same object - which is what the old `holes` list could not promise."""
+
+def circles_of(doc, names=()):
+    """(cx, cy, dia) for every circle in the matching sketches, in part coords."""
     out = []
     for sketch in sketch_objects(doc):
-        if names and sketch.Name not in names and sketch.Label not in names:
+        if names and not (_matches(sketch.Name, names)
+                          or _matches(sketch.Label, names)):
             continue
         for geom in sketch.Geometry:
             if not isinstance(geom, Part.Circle):
                 continue
             centre = sketch.Placement.multVec(geom.Center)
             out.append((centre.x, centre.y, 2.0 * geom.Radius))
+    return out
+
+
+def hole_callouts(doc, names=()):
+    """{(round(cx, 3), round(cy, 3)): engineering suffix} read from `PartDesign::Hole`.
+
+    extracts depth, counterbore/countersink and thread intent straight off the
+    built feature tree so TechDraw callouts stay coupled to the geometry."""
+    out = {}
+    for feat in solid_features(doc):
+        if feat.TypeId != types.PartDesign.Hole:
+            continue
+        sk_name = profile_name(feat)
+        if names and not _matches(sk_name, names):
+            continue
+        sk = doc.getObject(sk_name) if sk_name else None
+        if sk is None:
+            continue
+        parts = []
+        depth_type = str(getattr(feat, "DepthType", "ThroughAll"))
+        if depth_type == "ThroughAll":
+            parts.append("THRU")
+        else:
+            parts.append("x %g" % round(float(getattr(feat, "Depth", 0.0)), 2))
+        cut = str(getattr(feat, "HoleCutType", "None"))
+        if cut == "Counterbore":
+            cd = round(float(getattr(feat, "HoleCutDiameter", 0.0)), 2)
+            ch = round(float(getattr(feat, "HoleCutDepth", 0.0)), 2)
+            parts.append("CBORE %gx%g" % (cd, ch))
+        elif cut == "Countersink":
+            cd = round(float(getattr(feat, "HoleCutDiameter", 0.0)), 2)
+            parts.append("CSINK %g" % cd)
+        if getattr(feat, "Threaded", False):
+            parts.append("THREADED")
+        suffix = " " + " ".join(parts) if parts else ""
+        for geom in sk.Geometry:
+            if isinstance(geom, Part.Circle):
+                c = sk.Placement.multVec(geom.Center)
+                out[(round(c.x, 3), round(c.y, 3))] = suffix
     return out
 
 
@@ -346,7 +501,7 @@ def blank_of(spec, keep=(), dressed=False):
     def build(doc, body):
         steps = solid_features(doc)
         cuts = [f for f in subtractive(doc)
-                if profile_name(f) not in keep]
+                if not _matches(profile_name(f), keep)]
         trims = [before.Shape.cut(after.Shape)
                  for before, after in zip(steps, steps[1:])
                  if dressed and after in cuts
@@ -364,10 +519,11 @@ def blank_of(spec, keep=(), dressed=False):
 
 
 def stray_openings(spec):
-    """the openings a part declares that are not the sketch of any of its cuts."""
+    """the openings (or glob patterns) a part declares that match no cut."""
     def build(doc, body):
-        cuts = {profile_name(f) for f in subtractive(doc)}
-        return [name for name in spec.openings if name not in cuts]
+        cuts = [profile_name(f) for f in subtractive(doc) if profile_name(f)]
+        return [pat for pat in spec.openings
+                if not any(_matches(c, (pat,)) for c in cuts)]
 
     return _in_scratch(spec, build)
 

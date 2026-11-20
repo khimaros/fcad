@@ -21,12 +21,24 @@ never regress on them.
   `profile` (a bom label), `length`, `grounded`, `embeds`, the drawing and intent
   declarations (`dimension_sketches`/`dimension_circles`, `openings`), and
   realizes it via `build(doc, body)` (a PartDesign body, the well-lit path), a
-  `solid()` method, or the project's `from_spec`. a part's *outline* - the stock
+  `solid()` method, `PartSpec.from_step(...)` (an off-the-shelf vendor STEP part
+  marked `cots=True` with optional `sku`, `unit_cost`, `mass_g`), or the
+  project's `from_spec`. optional `material`, `sheet_size`, `flat_pattern`, and
+  `bom_group` carry per-part FEM materials, 2D sheet blank dimensions,
+  sheet-metal flat-pattern unfolding, and handed-variant BOM grouping.
+  `fcad.SubAssembly` and `fcad.compose` compose reusable multi-part modules and
+  merge placements for shared part names. a part's *outline* - the stock
   it is cut from - comes from the project's `profile`/`profile2d` and is what
   `dist/sketches` draws and the void assertion measures against for a part fcad
   cannot derive a blank for. `fcad.PartSpec` is the ready-made part (`fcad.Part`
   remains an alias); a project may use its own type exposing the same surface. an
   assembly with no part flagged `grounded` anchors its first part.
+- R1.3 `fcad.geom_select` provides topology-safe edge and face predicates
+  (`at_x`/`at_y`/`at_z`, `along_axis`, `normal_dir`, `curved`, `straight`,
+  `in_box`, `all_of`, `any_of`, `invert`) for `PartDesign` features and fails
+  loudly on zero or unexpected match counts. `partdesign.add_sketch` supports
+  per-vertex fillet radii `(x, y, r)` and stadium `slots`, emitting
+  fully-constrained sketches with true circular arcs.
 - R1.2 the project location is resolved from (in order) the `--project` flag, the
   `FCAD_PROJECT` env var, then the current directory; it may name a directory or a
   `.fcad` file, and a directory holding a sole `.fcad` (and no `project.py`) is
@@ -90,6 +102,14 @@ never regress on them.
   only a proxy for cost - a 16 ft board is not one 8 ft board - and waste
   *percentage* is worse than either, since a model can buy less total timber at
   a higher percentage.
+- R2.5.2 2D sheet stock (`fcad.Sheet(w, h, price=...)` in `STOCK`) is packed by
+  2D guillotine nesting into `dist/<name>-sheetlist.csv` using each part's
+  `sheet_size` or `flat_pattern` dimensions. a part declaring a `flat_pattern`
+  (e.g. from `fcad.sheetmetal.unfold_u_channel` or `unfold_box_tray`) exports
+  `dist/sketches/<part>-flat.svg` with solid cut contours and dashed bend lines.
+- R2.6 TechDraw part drawings read `PartDesign::Hole` intent (`THRU`, blind
+  depth, `CBORE`, `CSINK`, `THREADED`) onto hole callouts, and assembly
+  drawings include a BOM table listing parts, quantities, and profiles.
 
 ## R3 - validate (headless)
 
@@ -150,6 +170,11 @@ never regress on them.
 - R3.1.3 a project may declare `CONSTRAINTS`: predicates over its own computed
   values saying when the model still means what it says. `check` asserts them
   and reports the ones that broke, by whatever name the predicate gives itself.
+- R3.1.9 a project declaring `MOTION` (kinematic keyframe sweeps over `PARAMS`)
+  is checked across every sampled pose for `CONSTRAINTS` violations, structural
+  overlaps, and fastener seating; `build assembly` records per-frame placements
+  in `dist/<name>-motion.json`, and `fcad animate --subject motion` renders the
+  trajectory to `dist/<name>.motion.{mp4,gif}`.
 - R3.2 `precommit` builds everything, then runs `check`. a build that raises,
   under `precommit` or `build`, exits non-zero and prints the traceback: a
   crash must never read as a pass.
@@ -163,8 +188,9 @@ never regress on them.
 
 - R3b.1 `optimize` sweeps named numeric parameters over a grid, packs the real
   bom for each candidate through the cut list solver, and ranks them by
-  purchased length or board count. it never touches the kernel beyond loading
-  the project.
+  purchased length, board count, total price (1D stock + 2D sheets + COTS unit
+  costs), or total mass (explicit `mass_g` or `volume * density`). it never
+  builds geometry unless an unannotated part requests `--objective mass`.
 - R3b.2 `optimize` must refuse any candidate that violates `CONSTRAINTS`, and
   must warn when a project declares none. an optimiser over a parametric model
   will otherwise find the corner where the model degrades and report it as a
@@ -378,6 +404,13 @@ never regress on them.
   `FCAD_MEM` sets the ceiling and `FCAD_FEM_MESH_TIMEOUT` the wall clock. the
   estimate is a fit and so is advisory in both directions; what this forbids is
   a run reaching the OOM killer with nothing said.
+
+- R6.6 when structural parts in an assembly declare distinct `material` values,
+  `fem` builds a conformal `CompSolid` via `generalFuse` and assigns per-region
+  `MaterialSolid` objects (plus optional explicit `*TIE` face constraints). a
+  `FEM` case may declare `"target"` and `"params"` overrides to solve multiple
+  kinematic poses. `fem_render.decimate` vertex-clusters dense boundary meshes
+  for `fem-animate` while carrying per-node scalar and vector fields.
 
 ## external requirements
 

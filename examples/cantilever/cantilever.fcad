@@ -1,51 +1,28 @@
 # -*- mode: python -*- vim: ft=python
 """a steel cantilever beam: the smallest project that exercises `fcad fem`.
 
-boiled down to one part, so the FEM descriptor is the whole point. the beam is
 fixed at its -X end and pulled down by a force on its +X end, which is the
-textbook cantilever: tip deflection is F*L^3 / (3*E*I) and root bending stress is
-M*c / I, so the solve can be checked against theory rather than just eyeballed.
-
-faces are picked by geometry predicate, never by a "FaceN" index that reorders the
-moment the geometry changes. `MATERIAL` states steel once at project level, so the
-case need not repeat it. a case that declares `loads` gets `self_weight` off by
-default, which keeps this comparable to the closed-form beam.
-
-a force's `magnitude` is in N and its `direction` is a signed axis, independent of
-which face carries it. the other kind, `{"kind": "pressure"}`, is in MPa and acts
-along the loaded face's own normal instead (`reversed` flips it), so it takes no
-direction. lengths are mm throughout.
-
-no `mesh_size` is declared: fcad meshes 2nd order, which is accurate enough on a
-plain prismatic beam that the inferred default (bbox diagonal / 20) lands inside
-1% of the closed form. a part with small features usually wants one stated.
-
-`fcad fem` writes dist/<target>.fem.{FCStd,npz}; `--modal` adds eigenmodes. it
-needs gmsh and ccx on PATH.
+textbook cantilever: tip deflection is F*L^3 / (3*E*I) and root bending stress
+is M*c / I. `magnitude` is a callable `lambda p: p["tip_load"]` so edits to
+`tip_load` in the VarSet or via FEM `params` take effect immediately.
 """
-
-# `Placement` is FreeCAD's own: it imports by name because a .fcad is executed
-# inside FreeCAD, and fcad injects nothing into a project's namespace. the beam
-# is declared rather than built, so nothing else from the kernel is needed.
-from FreeCAD import Placement
 
 import fcad
 from fcad import fem_select as fs
 from fcad.freecad import partdesign
 
+COL_STEEL = (0.55, 0.58, 0.63)
+
 PARAMS = {"length": 300.0, "width": 30.0, "height": 20.0, "tip_load": 500.0}
 
-# floats become PropertyLength (fcad models mm geometry), so the one parameter
-# that is a force rather than a dimension says so.
 PARAM_META = {"tip_load": {"type": "float"}}
 
 MATERIAL = "steel"
 
-# one case for every target, so both `fcad fem` (the assembly) and `fcad fem beam`
-# resolve.
 FEM = {"__default__": {
     "fixed": [fs.min_along("x")],
-    "loads": [{"faces": fs.max_along("x"), "magnitude": PARAMS["tip_load"],
+    "loads": [{"faces": fs.max_along("x"),
+               "magnitude": lambda p: p["tip_load"],
                "direction": "-z"}],
 }}
 
@@ -56,13 +33,11 @@ def _outline(length, width):
 
 
 def _beam(doc, body, length, width, height):
-    """a plain prismatic bar: the outline padded, nothing cut."""
-    partdesign.pad_and_bore(doc, body, _outline(length, width), height,
-                            name="beam")
+    partdesign.pad_and_bore(doc, body, _outline(length, width), height)
 
 
 def compute(p):
     l, w, h = p["length"], p["width"], p["height"]
-    return [fcad.PartSpec("beam", profile="%gx%g bar" % (w, h),
-                          placements=[Placement()], length=l,
+    return [fcad.PartSpec("beam", profile="%gx%g bar" % (w, h), length=l,
+                          color=COL_STEEL,
                           build=lambda doc, body: _beam(doc, body, l, w, h))]

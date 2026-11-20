@@ -25,7 +25,10 @@ src/fcad/
                   the varset schema/enum choices from PARAMS when not given
   loader.py       load a project (a dir's project.py or a .fcad file) and return
                   its Project, declared explicitly (PROJECT) or by convention
-  cutlist.py      1d bin packing of the bom into buyable stock (pure stdlib)
+  cutlist.py      1d bin packing + 2d guillotine sheet nesting (pure stdlib)
+  sheetmetal.py   K-factor bend allowance and flat-pattern SVG export (stdlib)
+  motion.py       kinematic keyframe sampling and motion json export (stdlib)
+  geom_select.py  topology-safe edge/face predicates for PartDesign (stdlib)
   limits.py       what a child may spend: memory budget + estimate, gmsh wall
                   clock, the inherited rlimit (pure stdlib, imported both sides)
   _run.py         spawn the in-freecad entry: own session, inherited ceiling

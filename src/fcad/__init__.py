@@ -10,7 +10,8 @@ matplotlib renderer in `fcad.render` (the `[render]` extra).
 """
 
 # `Part` is the name PartSpec shipped under, kept working for existing projects.
-from fcad.project import Part, PartSpec, Project
+from fcad.cutlist import Sheet
+from fcad.project import Part, PartSpec, Project, SubAssembly, compose
 
-__all__ = ["Part", "PartSpec", "Project"]
+__all__ = ["Part", "PartSpec", "Project", "Sheet", "SubAssembly", "compose"]
 __version__ = "0.1.0"

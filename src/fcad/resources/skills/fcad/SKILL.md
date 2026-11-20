@@ -18,9 +18,11 @@ does not cover the FreeCAD api. three things do, and all are already on disk:
   feature up there rather than guessing its property names.
 - **`CONTRIBUTING.md`, beside this file**: the FreeCAD gotchas fcad has already
   absorbed, under "api notes". read that before rediscovering one.
-- **`examples/`, beside this file**: three single-file projects that pass
-  `fcad precommit` as they stand. `fastenplates` is the one to crib from - an
-  assembly, a turned part, `embeds`, `CONSTRAINTS` and its own `tests/`.
+- **`examples/`, beside this file**: four projects that pass `fcad precommit`
+  as they stand. `fastenplates` is the minimal assembly to crib from, and
+  `robotarm` exercises the full surface (`geom_select`, curved/slotted sketches,
+  `MOTION`, multi-material/multi-pose `FEM`, 2D `Sheet` nesting, `sheetmetal`,
+  `SubAssembly`, `from_step`, `bom_group`, `ASSEMBLE`).
 
 **`README.md` ships beside this file** and is fcad's user documentation: the same
 contract at length, plus the parts this skill only points at - the 3d diff and
@@ -99,10 +101,11 @@ else is optional refinement:
 | `PARAM_META` | per-param `group`, enum `choices`, explicit `type`, `min`, `max` |
 | `FEM` | per-target analysis cases (below) |
 | `MATERIAL` / `MATERIALS` | project-wide fem material default / named registry |
-| `STOCK` | buyable stock lengths per bom profile (below) |
+| `STOCK` | buyable 1D lengths or 2D `fcad.Sheet` sizes per bom profile; dict or callable `(values) -> dict` |
 | `FROM_SPEC` / `PROFILE` | realize a spec that is not an `fcad.PartSpec` |
 | `CONSTRAINTS` | predicates saying when the model still means what it says |
 | `ASSEMBLE` | joint the assembly yourself (below) instead of Fixed-to-datum |
+| `MOTION` | kinematic keyframe sweeps checked by `check` and animated by `--subject motion` |
 | `NAME`, `SCHEMA`, `ENUM_CHOICES` | override the inferred name/varset/dropdowns |
 
 each is read as the UPPER_CASE constant or the lowercase `Project` kwarg name,
@@ -112,11 +115,35 @@ so `PARAMS` + `def compute` is idiomatic. an explicit
 ### fcad.PartSpec
 
 ```
-fcad.PartSpec(name, placements, build=None, solid=None, profile="", length=None,
-              grounded=False, embeds=False, dimension_sketches=(),
-              dimension_circles=(), openings=(), profile2d=None,
-              color=None, transparency=0, disjoint=False, rides=None)
+fcad.PartSpec(name, placements=None, build=None, solid=None, profile="",
+              length=None, grounded=False, embeds=False,
+              dimension_sketches=(), dimension_circles=(), openings=(),
+              profile2d=None, color=None, transparency=0, disjoint=False,
+              rides=None, material=None, sheet_size=None, flat_pattern=None,
+              cots=False, sku="", unit_cost=None, mass_g=None, bom_group="")
 ```
+
+`placements` defaults to `[Placement()]` and coerces a single `Placement` to a
+1-element list. `PartSpec` fails fast on passing both `build` and `solid`,
+out-of-range `transparency`, or invalid `color`.
+
+- `PartSpec.from_step(name, step_path, placements, ...)` loads a vendor STEP
+  file lazily (`cots=True`), carrying `sku`/`unit_cost`/`mass_g` into the BOM
+  while skipping PartDesign void and disjoint checks.
+- `fcad.SubAssembly(name, specs).place(placements)` + `fcad.compose(...)`
+  compose reusable multi-part modules and merge repeated child part names.
+- `material` enables per-part multi-material conformal `CompSolid` assembly FEM.
+- `sheet_size` / `flat_pattern` (via `fcad.sheetmetal`) feed 2D `fcad.Sheet`
+  nesting (`dist/<name>-sheetlist.csv`) and `dist/sketches/<part>-flat.svg`.
+- `bom_group` groups asymmetrically drilled handed twins in BOM output.
+- `dimension_sketches` and `openings` accept exact sketch names or fnmatch globs
+  (`*_bore*`), failing `check` if any entry matches nothing.
+- `fcad.geom_select` (`edges`/`faces` with `at_x`/`at_y`/`at_z`, `along_axis`,
+  `normal_dir`, `curved`, `straight`, `in_box`, `all_of`, `any_of`, `invert`)
+  picks PartDesign edges/faces without hardcoded `EdgeN` indices and raises on
+  unexpected counts. `partdesign.add_sketch` also accepts per-vertex corner
+  radii `(x, y, r)` and angled stadium `slots`, and `pad_and_bore` defaults
+  `name` to `body.Name`.
 
 **the look, for `fcad render`:** `color` is an `(r, g, b)` of 0..1 floats and
 `transparency` runs 0 (solid) to 100. give every part of a model with more than
@@ -600,22 +627,19 @@ declare `assemble` and you own the jointing. fcad has already created the links
 and grounded the anchors; you get the real `Assembly::AssemblyObject`:
 
 ```python
-def assemble(doc, asm, links):
+def ASSEMBLE(doc, asm, links):
     """links: {"base": [Link_001], "arm": [Link_001, Link_002], ...}"""
-    import JointObject                       # /usr/share/freecad/Mod/Assembly
     from fcad.freecad import build_assembly as asmlib
 
-    joints = doc.getObject("Joints")
-    j = joints.newObject("App::FeaturePython", "Rev_arm")
-    JointObject.Joint(j, asmlib.joint_type(JointObject, "Revolute"))
-    j.Reference1 = asmlib.whole_of(asm, links["base"][0])
-    j.Reference2 = asmlib.whole_of(asm, links["arm"][0])
+    asmlib.joint(doc, asm, "Rev_arm", "Revolute",
+                 links["base"][0], links["arm"][0])
+    asmlib.fix_remaining(doc, asm, links, links["base"][0])
 ```
 
-fcad adds **no** Fixed joints when a hook is present - one owner at a time, so
-there is no over-constraint puzzle. call
-`build_assembly.fix_to_datum(JointObject, asm, joints, datum, links)` for the
-instances you do not want to joint yourself; that is exactly fcad's default.
+`asmlib.joint` returns the real FreeCAD joint object so any joint property can
+be set directly, and `asmlib.fix_remaining` fixes every remaining unjointed
+component to the datum. fcad adds **no** Fixed joints when a hook is present -
+one owner at a time, so there is no over-constraint puzzle.
 
 `check`'s "every component is grounded or jointed" still applies, and a custom
 joint satisfies it - the hook is not an escape from the assertion.

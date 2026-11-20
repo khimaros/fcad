@@ -57,14 +57,16 @@ def build_one(project, spec, values, dirs, formats):
     clock = fcutil.Clock()
     doc = App.newDocument(spec.name)
     fcutil.add_varset(doc, project, values)
+    callouts = None
     if is_declared(spec):
         # the part is its feature tree: the sketches in it are the definition,
         # not a drawing of one, and the circles the drawing dimensions are read
         # back out of them rather than declared a second time.
         obj = partdesign.build_body(doc, spec)
         sketches = partdesign.sketch_objects(doc)
-        holes = partdesign.circles_of(
-            doc, list(getattr(spec, "dimension_sketches", ()) or ()))
+        dim_names = list(getattr(spec, "dimension_sketches", ()) or ())
+        holes = partdesign.circles_of(doc, dim_names)
+        callouts = partdesign.hole_callouts(doc, dim_names)
     else:
         # a part that hands over a solid has no tree to read, so it lists the
         # circles it wants dimensioned itself, and its defining outline is drawn
@@ -104,13 +106,18 @@ def build_one(project, spec, values, dirs, formats):
     if "drawing" in formats:
         fcutil.make_drawing(doc, [obj],
                             os.path.join(dirs["drawings"], spec.name + ".dxf"),
-                            PART_VIEW, holes=holes,
+                            PART_VIEW, holes=holes, callouts=callouts,
                             title={"part": spec.name, "project": project.name})
         clock.lap("drawing")
     if "sketch" in formats and sketches:
         fcutil.export_sketch(doc, sketches,
                              os.path.join(dirs["sketches"], spec.name))
         clock.lap("sketch")
+    fp = getattr(spec, "flat_pattern", None)
+    fp = fp() if callable(fp) else fp
+    if "sketch" in formats and fp is not None:
+        fp.export_svg(os.path.join(dirs["sketches"], spec.name + "-flat.svg"))
+        clock.lap("flat")
     App.closeDocument(doc.Name)
     print(clock.line("part " + spec.name))
 

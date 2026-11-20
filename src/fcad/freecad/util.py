@@ -358,21 +358,12 @@ def _cluster_rows(holes, tol=1.0):
     return rows
 
 
-def add_hole_dims(view, holes):
+def add_hole_dims(view, holes, callouts=None):
     """diameter, pitch and edge-offset callouts for the drilled holes.
 
-    holes are given in the part's local frame as (cx, cy, dia). the top view
-    looks along Z with the model's X/Y as the view's X/Y, so a hole's unscaled
-    2d view point is simply (cx, cy). holes are clustered into rows by cy and
-    each row gets a diameter + pitch callout, the rows stacked above the view
-    (clear of the width extent dim, which also sits above). uses makeDistanceDim
-    (2d points) not makeDistanceDim3d (the 3d variant segfaults adding a cosmetic
-    vertex).
-
-    must be called only once the view's projected geometry exists: headless
-    that is right after recompute, but in the gui the geometry is realized
-    lazily on paint, so the caller has to paint the page first or makeDistanceDim
-    segfaults."""
+    holes are given in the part's local frame as (cx, cy, dia). optional
+    `callouts` maps `(round(cx, 3), round(cy, 3))` to engineering suffixes read
+    from `PartDesign::Hole` (e.g. ` THRU CBORE 11x4`)."""
     import TechDraw
     if not holes:
         return
@@ -395,7 +386,8 @@ def add_hole_dims(view, holes):
     for row in _cluster_rows(holes):
         row = sorted(row, key=lambda h: h[0])
         cx, cy, dia = row[len(row) // 2]
-        dim(cx - dia / 2.0, cx + dia / 2.0, cy, DIA_SIGN + "%.1f", y)
+        suffix = (callouts or {}).get((round(cx, 3), round(cy, 3)), "")
+        dim(cx - dia / 2.0, cx + dia / 2.0, cy, DIA_SIGN + "%.1f" + suffix, y)
         y += pad
         if len(row) > 1:
             dim(row[0][0], row[1][0], cy, "%.1f", y)   # pitch
@@ -403,6 +395,50 @@ def add_hole_dims(view, holes):
     # the first hole's offset from the part center, once for the whole pattern.
     first = min(holes, key=lambda h: h[0])
     dim(0.0, first[0], first[1], "%.1f", y)
+
+
+def _bom_lines(specs):
+    lines = ["BOM"]
+    for spec in specs[:18]:
+        prof = getattr(spec, "profile", "") or "-"
+        lines.append("%s  x%d  %s" % (spec.name, len(spec.placements), prof))
+    if len(specs) > 18:
+        lines.append("... +%d more" % (len(specs) - 18))
+    return lines
+
+
+def add_bom_table(doc, page, specs):
+    """add a compact BOM annotation table onto an assembly TechDraw sheet."""
+    if not specs:
+        return
+    ann = doc.addObject("TechDraw::DrawViewAnnotation", "BOM_Table")
+    ann.Text = _bom_lines(specs)
+    ann.TextSize = 3.2
+    ann.X = 52.0
+    ann.Y = 26.0
+    page.addView(ann)
+
+
+def _write_dxf_bom(path, specs):
+    """emit BOM TEXT entities into the DXF ENTITIES section when writeDXFPage
+    omits `TechDraw::DrawViewAnnotation`."""
+    if not specs or not os.path.exists(path):
+        return
+    with open(path) as f:
+        text = f.read()
+    marker = "  0\nENDSEC\n  0\nSECTION\n  2\nOBJECTS"
+    idx = text.find(marker)
+    if idx < 0:
+        return
+    chunks = []
+    for i, line in enumerate(_bom_lines(specs)):
+        y = 44.0 - i * 4.2
+        chunks.append(
+            "  0\nTEXT\n  8\n0\n100\nAcDbEntity\n100\nAcDbText\n"
+            " 10\n12.0\n 20\n%.3f\n 30\n0.0\n 40\n3.0\n  1\n%s\n"
+            % (y, line))
+    with open(path, "w") as f:
+        f.write(text[:idx] + "".join(chunks) + text[idx:])
 
 
 def _view_by_caption(page, caption):
@@ -532,14 +568,20 @@ def export_sketch(doc, sketches, stem):
     TechDraw.writeDXFPage(page, stem + ".dxf")
 
 
-def make_drawing(doc, sources, path, directions, holes=(), title=None):
+def make_drawing(doc, sources, path, directions, holes=(), title=None,
+                 callouts=None, bom=None):
     import TechDraw
     page = _page(doc, sources, directions, tag="_dwg", dims=True, title=title)
     if holes:
         # holes are drilled through the thickness, so they read off the top view.
         view = _view_by_caption(page, "TOP")
         if view is not None:
-            add_hole_dims(view, holes)
-            doc.recompute()
+            add_hole_dims(view, holes, callouts=callouts)
+    if bom:
+        add_bom_table(doc, page, bom)
+    if holes or bom:
+        doc.recompute()
     TechDraw.writeDXFPage(page, path)
+    if bom:
+        _write_dxf_bom(path, bom)
     return page

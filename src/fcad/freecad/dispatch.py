@@ -213,6 +213,17 @@ def check(project, values=None):
         print("check ok: every part is one connected solid" + (
             ", or flagged `disjoint` (%s)" % ", ".join(meant) if meant else ""))
 
+    if getattr(project, "motion", None):
+        n_poses, issues = build_assembly.find_motion_issues(project, values)
+        if issues:
+            failed = True
+            print("check failed: %d motion issue(s) across %d pose(s):"
+                  % (len(issues), n_poses))
+            for label, why in issues:
+                print("  %s: %s" % (label, why))
+        elif n_poses:
+            print("check ok: motion envelope clean across %d pose(s)" % n_poses)
+
     asm = os.path.join(project.dist, project.name + ".FCStd")
     if not os.path.exists(asm):
         print("check skipped: build the assembly first (fcad build)")

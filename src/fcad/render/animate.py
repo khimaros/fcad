@@ -36,6 +36,7 @@ move the duration and FCAD_SPEED scales whatever results.
 """
 
 import json
+import math
 import os
 import tempfile
 
@@ -44,6 +45,9 @@ from fcad.render import MESH_SECONDS, assemble, render
 
 SECONDS = float(os.environ.get("FCAD_SECONDS", MESH_SECONDS))
 FPS = int(os.environ.get("FCAD_FPS", 10))
+# 25 fps divides 100 centiseconds evenly (40 ms/frame), so both MP4 and GIF
+# play with smooth, jitter-free pacing on continuous mechanism motion.
+MOTION_FPS = int(os.environ.get("FCAD_FPS", 25))
 PLAN_NAME = "plan.json"
 SHOT_NAME = "%05d.png"
 # decimal places an instance's remaining distance is planned to: a part count
@@ -90,6 +94,84 @@ def _assemble(target, name, dist, how):
             away, assemble.duration(count))
 
 
+def _motion(target, name, dist):
+    """load recorded kinematic frames and loop flag from `<name>-motion.json`."""
+    if not config.is_assembly(name, target):
+        raise SystemExit(
+            "fcad animate: --subject motion animates the whole assembly, not "
+            "part %r." % target)
+    path = config.motion_path(dist, name)
+    if not os.path.exists(path):
+        raise SystemExit(
+            "fcad animate: no motion data at %s - declare MOTION and run "
+            "`fcad build assembly` first" % path)
+    with open(path) as f:
+        data = json.load(f)
+    frames = data.get("frames") or []
+    if not frames:
+        raise SystemExit("fcad animate: %s holds no motion frames" % path)
+    return frames, bool(data.get("loop", True)), SECONDS
+
+
+def _slerp(q0, q1, t):
+    """spherical linear interpolation between two `(x, y, z, w)` quaternions."""
+    dot = sum(a * b for a, b in zip(q0, q1))
+    if dot < 0.0:
+        q1 = [-b for b in q1]
+        dot = -dot
+    if dot > 0.9995:
+        out = [a + (b - a) * t for a, b in zip(q0, q1)]
+    else:
+        theta = math.acos(max(-1.0, min(1.0, dot)))
+        s = math.sin(theta)
+        w0 = math.sin((1.0 - t) * theta) / s
+        w1 = math.sin(t * theta) / s
+        out = [w0 * a + w1 * b for a, b in zip(q0, q1)]
+    norm = math.sqrt(sum(v * v for v in out)) or 1.0
+    return [v / norm for v in out]
+
+
+def _blend_frame(fa, fb, t):
+    """interpolate every instance placement between recorded frames `fa` and `fb`."""
+    if t <= 0.0:
+        return fa
+    if t >= 1.0:
+        return fb
+    out = {}
+    for part, pls_a in fa.items():
+        pls_b = fb.get(part)
+        if not pls_b or len(pls_b) != len(pls_a):
+            out[part] = pls_a
+            continue
+        blended = []
+        for (pa, qa), (pb, qb) in zip(pls_a, pls_b):
+            pos = [pa[k] + (pb[k] - pa[k]) * t for k in range(3)]
+            blended.append([pos, _slerp(qa, qb, t)])
+        out[part] = blended
+    return out
+
+
+def _resample_motion(recorded, n_frames, loop=True):
+    """smoothly interpolate `n_frames` poses from `recorded` via lerp + SLERP."""
+    m = len(recorded)
+    if m <= 1 or n_frames <= 1:
+        return [recorded[0]] * max(1, n_frames)
+    out = []
+    for i in range(n_frames):
+        if loop:
+            u = (i / float(n_frames)) * m
+            lo = int(math.floor(u)) % m
+            hi = (lo + 1) % m
+            t = u - math.floor(u)
+        else:
+            u = (i / float(n_frames - 1)) * (m - 1)
+            lo = min(int(math.floor(u)), m - 1)
+            hi = min(lo + 1, m - 1)
+            t = u - lo
+        out.append(_blend_frame(recorded[lo], recorded[hi], t))
+    return out
+
+
 def animate(draw, target="assembly", stem=None, name=None, dist=None,
             camera="orbit", subject="assemble", order="grounded", seconds=None,
             fps=None, speed=None, size=None):
@@ -98,7 +180,28 @@ def animate(draw, target="assembly", stem=None, name=None, dist=None,
     `draw(plan path)` runs the FreeCAD viewer over the plan and returns its exit
     status; the cli supplies it, since it is the cli that knows the binaries."""
     name, dist = render._resolve(name, dist)
+    if subject == "motion":
+        fps = max(1, int(fps or MOTION_FPS))
+        recorded, loop, natural = _motion(target, name, dist)
+        frames = render.frames_for(render.length(natural, seconds, speed), fps)
+        render.plan(frames, fps, "%s %s" % (target, subject))
+        stem = stem or config.artifact_stem(dist, name, target, config.MOTION)
+        sampled = _resample_motion(recorded, frames, loop=loop)
+        with tempfile.TemporaryDirectory(prefix="fcad_animate_") as tmp:
+            shots, path = os.path.join(tmp, SHOT_NAME), os.path.join(tmp, PLAN_NAME)
+            with open(path, "w") as f:
+                json.dump({"mode": "motion", "target": target, "size": size,
+                           "shots": shots,
+                           "frames": [[*render.camera_at(i / frames, camera),
+                                       sampled[i]] for i in range(frames)]}, f)
+            if draw(path):
+                raise SystemExit("fcad animate: the frames could not be drawn")
+            mp4, gif = render.encode(shots, stem, fps)
+        print("animated %s -> %s, %s" % (target, mp4, gif))
+        return
+
     fps = max(1, int(fps or FPS))
+
     labels, offsets, away, natural = (
         _assemble(target, name, dist, order) if subject == "assemble"
         else _static())

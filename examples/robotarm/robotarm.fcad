@@ -1,0 +1,772 @@
+# -*- mode: python -*- vim: ft=python
+"""a 3-DOF articulated desktop robotic arm exercising all of fcad's capabilities.
+
+exercises both the core contract and the extended capabilities:
+- topology-safe edge predicates (`fcad.geom_select`) and curved/slotted sketches
+- kinematic `MOTION` sweeps checked dynamically and animated (`--subject motion`)
+- multi-material CompSolid + multi-pose `FEM` (`al6061`, `steel1045`, `bronze`,
+  `polycarbonate`, `rubber`)
+- 1D bar/rod stock alongside 2D `fcad.Sheet` nesting and K-factor sheet-metal
+  flat-pattern unfolding (`fcad.sheetmetal`)
+- reusable `fcad.SubAssembly` joint kits, imported COTS STEP motor (`from_step`),
+  and handed left/right forearm twins grouped via `bom_group`
+- price- and mass-coupled `optimize` plus `PartDesign::Hole` callouts and
+  assembly BOM tables on TechDraw drawings
+"""
+
+import os
+
+from FreeCAD import Placement, Rotation, Vector
+
+import fcad
+from fcad import fem_select as fs, geom_select as gs, sheetmetal, types
+from fcad.freecad import build_assembly as asmlib, partdesign
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MOTOR_STEP = os.path.join(HERE, "nema17.step")
+
+# fixed geometric proportions (mm) shared across mating parts.
+FOOT_H = 6.0
+FOOT_SIZE = 20.0
+FOOT_INSET = 16.0
+FRAME_W = 18.0
+COVER_GAP = 2.0
+TURRET_PED_DIA = 60.0
+COVER_HOLE_DIA = 68.0
+TURRET_DECK_DIA = 82.0
+TURRET_DECK_THK = 10.0
+EAR_PIVOT_H = 26.0
+EAR_TOP_R = 16.0
+FOREARM_THK = 8.0
+PIN_HEAD_ADD = 6.0
+PIN_HEAD_THK = 4.0
+CAP_DIA = 16.0
+CAP_THK = 3.0
+M5_DIA = 5.0
+M3_DIA = 3.0
+HEAD_SCALE = 1.8
+HEAD_H_SCALE = 0.7
+M3_GRIP = 10.0
+WRIST_FLANGE_T = 8.0
+WRIST_RAIL_W = 76.0
+WRIST_RAIL_H = 22.0
+JAW_THK = 14.0
+JAW_FINGER_W = 6.0
+JAW_BOLT_OFF = 3.0
+JAW_HEEL_T = 4.0
+JAW_LEN = 36.0
+JAW_H = 18.0
+JAW_TIP_T = 4.0
+MIN_REACH = 220.0
+MIN_LIGAMENT = 8.0
+MIN_GROUND_Z = 16.0
+CHAMFER_SM = 0.8
+CABLE_PORT_W = 24.0
+CABLE_PORT_H = 14.0
+CABLE_CLIP_DIA = 4.0
+BEND_R = 2.0
+
+# palette for `fcad render` and `fcad animate`: distinct per material role.
+COL_RUBBER = (0.14, 0.14, 0.16)
+COL_AL_RAW = (0.74, 0.77, 0.81)
+COL_AL_BLUE = (0.20, 0.42, 0.64)
+COL_AL_DARK = (0.24, 0.27, 0.32)
+COL_STEEL = (0.48, 0.51, 0.56)
+COL_BRONZE = (0.78, 0.58, 0.25)
+COL_JAW = (0.86, 0.36, 0.14)
+COL_COVER = (0.68, 0.84, 0.96)
+COL_BOLT = (0.30, 0.33, 0.38)
+COL_MOTOR = (0.18, 0.20, 0.24)
+
+# densities (g/mm^3) for fast analytic `mass_g` thunks during `optimize --objective mass`.
+RHO_AL = 2.70e-3
+RHO_STEEL = 7.85e-3
+RHO_BRONZE = 8.80e-3
+RHO_PC = 1.20e-3
+RHO_RUBBER = 1.15e-3
+
+PARAMS = {
+    "base_wid": 160.0,
+    "base_h": 46.0,
+    "wall_thk": 6.0,
+    "upper_len": 150.0,
+    "forearm_len": 130.0,
+    "link_wid": 34.0,
+    "link_thk": 10.0,
+    "pin_dia": 10.0,
+    "bushing_od": 16.0,
+    "theta_base": 20.0,
+    "theta_shoulder": 25.0,
+    "theta_elbow": 55.0,
+    "jaw_open": 24.0,
+    "payload_n": 15.0,
+    "gripper_style": "parallel",
+}
+
+PARAM_META = {
+    "base_wid": {"group": "Base", "min": 120.0, "max": 260.0},
+    "base_h": {"group": "Base", "min": 36.0, "max": 80.0},
+    "wall_thk": {"group": "Base", "min": 4.0, "max": 12.0},
+    "upper_len": {"group": "Arm", "min": 100.0, "max": 240.0},
+    "forearm_len": {"group": "Arm", "min": 90.0, "max": 220.0},
+    "link_wid": {"group": "Arm", "min": 24.0, "max": 50.0},
+    "link_thk": {"group": "Arm", "min": 6.0, "max": 16.0},
+    "pin_dia": {"group": "Joints", "min": 6.0, "max": 16.0},
+    "bushing_od": {"group": "Joints", "min": 12.0, "max": 22.0},
+    "theta_base": {"type": "angle", "group": "Pose", "min": -180.0, "max": 180.0},
+    "theta_shoulder": {"type": "angle", "group": "Pose", "min": -45.0, "max": 75.0},
+    "theta_elbow": {"type": "angle", "group": "Pose", "min": -90.0, "max": 120.0},
+    "jaw_open": {"group": "Gripper", "min": 6.0, "max": 44.0},
+    "payload_n": {"type": "float", "group": "Loads", "min": 1.0, "max": 100.0},
+    "gripper_style": {"group": "Gripper", "choices": ["parallel", "wide"]},
+}
+
+
+def _bar_label(w, t):
+    return "al bar %gx%g" % (w, t)
+
+
+def _rod_label(d):
+    return "steel rod %g" % d
+
+
+def _plate_label(t):
+    return "al sheet %gmm" % t
+
+
+def _pc_label(t):
+    return "pc sheet %gmm" % t
+
+
+STOCK = lambda p: {
+    # 1D linear bar and rod stock.
+    _bar_label(p["link_wid"], p["link_thk"]): [
+        (300.0, 8.50), (500.0, 13.00)],
+    _bar_label(p["link_wid"], FOREARM_THK): [
+        (300.0, 7.20), (500.0, 11.00)],
+    _rod_label(p["pin_dia"]): [(200.0, 5.00), (300.0, 7.00)],
+    # 2D sheet stock for the base plate, unfolded shell tray, and polycarbonate lid.
+    _plate_label(p["wall_thk"]): [
+        fcad.Sheet(400.0, 300.0, price=24.00),
+        fcad.Sheet(600.0, 400.0, price=42.00)],
+    _pc_label(p["wall_thk"]): [
+        fcad.Sheet(300.0, 200.0, price=12.00)],
+}
+
+MATERIALS = {
+    "al6061": {"E": 68900.0, "nu": 0.33, "rho": 2700.0},
+    "steel1045": {"E": 205000.0, "nu": 0.29, "rho": 7850.0},
+    "bronze": {"E": 110000.0, "nu": 0.34, "rho": 8800.0},
+    "polycarbonate": {"E": 2300.0, "nu": 0.37, "rho": 1200.0},
+    "rubber": {"E": 50.0, "nu": 0.45, "rho": 1150.0},
+}
+MATERIAL = "al6061"
+
+FEM = {
+    "assembly": {
+        "undrilled": True,
+        "fixed": [fs.min_along("z")],
+        "loads": [{"faces": fs.max_along("x"),
+                   "magnitude": lambda p: p["payload_n"], "direction": "-z"}],
+        "mesh_size": 14.0,
+        "modes": 3,
+    },
+    "assembly_folded": {
+        "target": "assembly",
+        "params": {"theta_base": 0.0, "theta_shoulder": 10.0, "theta_elbow": 20.0},
+        "undrilled": True,
+        "fixed": [fs.min_along("z")],
+        "loads": [{"faces": fs.max_along("x"),
+                   "magnitude": lambda p: p["payload_n"], "direction": "-z"}],
+        "mesh_size": 14.0,
+    },
+    "upper_arm": {
+        "material": "al6061",
+        "fixed": [fs.min_along("x")],
+        "loads": [{"faces": fs.max_along("x"),
+                   "magnitude": lambda p: p["payload_n"], "direction": "-y"}],
+        "mesh_size": 6.0,
+    },
+}
+
+CONSTRAINTS = [
+    lambda p, d: (d["reach"] >= MIN_REACH
+                  or "arm reach %.0f mm is under %.0f mm" % (d["reach"], MIN_REACH)),
+    lambda p, d: (p["link_wid"] - p["bushing_od"] >= 2.0 * MIN_LIGAMENT
+                  or "only %.1f mm wall around shoulder bushing"
+                  % ((p["link_wid"] - p["bushing_od"]) / 2.0)),
+    lambda p, d: (d["upper_relief_l"] >= 20.0
+                  or "upper_len %.0f mm too short for relief pocket" % p["upper_len"]),
+    lambda p, d: (d["forearm_relief_l"] >= 20.0
+                  or "forearm_len %.0f mm too short for relief pocket"
+                  % p["forearm_len"]),
+    lambda p, d: (p["jaw_open"] + 2.0 * JAW_THK <= WRIST_RAIL_W - 4.0
+                  or "jaws exceed wrist rail width"),
+    lambda p, d: (d["tip_z"] >= MIN_GROUND_Z
+                  or "gripper tip z=%.1f mm clears desk by less than %.0f mm"
+                  % (d["tip_z"], MIN_GROUND_Z)),
+]
+
+MOTION = [
+    {
+        "name": "pick_and_place",
+        "keyframes": [
+            {"theta_base": -25.0, "theta_shoulder": 15.0, "theta_elbow": 40.0,
+             "jaw_open": 34.0},
+            {"theta_base": 20.0, "theta_shoulder": 35.0, "theta_elbow": 65.0,
+             "jaw_open": 10.0},
+            {"theta_base": 55.0, "theta_shoulder": 15.0, "theta_elbow": 35.0,
+             "jaw_open": 30.0},
+        ],
+        "steps": 3,
+    },
+]
+
+
+def _rect(w, h, cx=0.0, cy=0.0):
+    hw, hh = w / 2.0, h / 2.0
+    return [(cx - hw, cy - hh), (cx + hw, cy - hh),
+            (cx + hw, cy + hh), (cx - hw, cy + hh)]
+
+
+def _rounded_rect(w, h, r, cx=0.0, cy=0.0):
+    hw, hh = w / 2.0, h / 2.0
+    return [(cx - hw, cy - hh, r), (cx + hw, cy - hh, r),
+            (cx + hw, cy + hh, r), (cx - hw, cy + hh, r)]
+
+
+def _xz_plane(y=0.0):
+    """sketch plane parallel to XZ at Y=`y`: sketch x is +X, sketch y is +Z."""
+    return Placement(Vector(0.0, y, 0.0), Rotation(Vector(1, 0, 0), 90))
+
+
+def _yz_plane(x=0.0):
+    """sketch plane parallel to YZ at X=`x`: sketch x is +Y, sketch y is +Z."""
+    return Placement(Vector(x, 0.0, 0.0), Rotation(Vector(1, 1, 1), 120))
+
+
+def _corner_bolts(base_wid):
+    o = base_wid / 2.0 - FRAME_W / 2.0
+    return [(-o, -o, M5_DIA), (o, -o, M5_DIA), (o, o, M5_DIA), (-o, o, M5_DIA)]
+
+
+def _chamfer_z(doc, body, base_feat, z_val, size, name):
+    ch = body.newObject(types.PartDesign.Chamfer, name)
+    ch.Base = (base_feat, gs.edges(base_feat.Shape, gs.at_z(z_val)))
+    ch.Size = size
+    doc.recompute()
+    return ch
+
+
+def _build_feet(doc, body, base_wid):
+    off = base_wid / 2.0 - FOOT_INSET
+    pads = [_rect(FOOT_SIZE, FOOT_SIZE, sx * off, sy * off)
+            for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)]
+    sk = partdesign.add_sketch(doc, body, "feet_sk", points=pads[0],
+                               loops=pads[1:], z=0.0)
+    pad = body.newObject(types.PartDesign.Pad, "feet_pad")
+    pad.Profile = sk
+    pad.Length = FOOT_H
+    doc.recompute()
+
+
+def _build_base_plate(doc, body, base_wid, wall_thk):
+    partdesign.pad_and_bore(doc, body, _rect(base_wid, base_wid), wall_thk,
+                            _corner_bolts(base_wid))
+
+
+def _build_base_shell(doc, body, base_wid, shell_h):
+    outer = _rect(base_wid, base_wid)
+    inner = _rect(base_wid - 2.0 * FRAME_W, base_wid - 2.0 * FRAME_W)
+    sk = partdesign.add_sketch(doc, body, "shell_sk", points=outer,
+                               loops=[inner], z=-shell_h / 2.0)
+    pad = body.newObject(types.PartDesign.Pad, "shell_pad")
+    pad.Profile = sk
+    pad.Length = shell_h
+    doc.recompute()
+    for i, (cx, cy, dia) in enumerate(_corner_bolts(base_wid), 1):
+        bsk = partdesign.add_sketch(doc, body, "shell_bore%d" % i,
+                                    circles=[(cx, cy, dia)], z=-shell_h / 2.0)
+        hole = body.newObject(types.PartDesign.Hole, "shell_hole%d" % i)
+        hole.Profile = bsk
+        hole.Diameter = dia
+        hole.DepthType = "ThroughAll"
+        hole.Reversed = True
+        doc.recompute()
+    port = partdesign.add_sketch(
+        doc, body, "cable_port",
+        points=_rect(CABLE_PORT_W, CABLE_PORT_H, 0.0, 0.0),
+        placement=_yz_plane(-base_wid / 2.0))
+    pkt = body.newObject(types.PartDesign.Pocket, "cable_port_cut")
+    pkt.Profile = port
+    pkt.SideType = "Symmetric"
+    pkt.Length = 2.0 * (FRAME_W + 2.0)
+    doc.recompute()
+
+
+def _build_base_cover(doc, body, base_wid, wall_thk):
+    sk = partdesign.add_sketch(doc, body, "cover_sk",
+                               points=_rect(base_wid, base_wid),
+                               circles=[(0.0, 0.0, COVER_HOLE_DIA)],
+                               z=-wall_thk / 2.0)
+    pad = body.newObject(types.PartDesign.Pad, "cover_pad")
+    pad.Profile = sk
+    pad.Length = wall_thk
+    doc.recompute()
+    for i, (cx, cy, dia) in enumerate(_corner_bolts(base_wid), 1):
+        bsk = partdesign.add_sketch(doc, body, "cover_bore%d" % i,
+                                    circles=[(cx, cy, dia)], z=-wall_thk / 2.0)
+        hole = body.newObject(types.PartDesign.Hole, "cover_hole%d" % i)
+        hole.Profile = bsk
+        hole.Diameter = dia
+        hole.DepthType = "ThroughAll"
+        hole.Reversed = True
+        doc.recompute()
+    _chamfer_z(doc, body, body.Tip, wall_thk / 2.0, CHAMFER_SM, "cover_bevel")
+
+
+def _build_turret(doc, body, ped_h, link_thk, pin_dia):
+    """pedestal passing through cover, flanged deck, and twin shoulder ears."""
+    sk1 = partdesign.add_sketch(doc, body, "ped_sk",
+                                circles=[(0.0, 0.0, TURRET_PED_DIA)], z=0.0)
+    p1 = body.newObject(types.PartDesign.Pad, "ped_pad")
+    p1.Profile = sk1
+    p1.Length = ped_h
+    doc.recompute()
+
+    sk2 = partdesign.add_sketch(doc, body, "deck_sk",
+                                circles=[(0.0, 0.0, TURRET_DECK_DIA)], z=ped_h)
+    p2 = body.newObject(types.PartDesign.Pad, "deck_pad")
+    p2.Profile = sk2
+    p2.Length = TURRET_DECK_THK
+    doc.recompute()
+
+    z_deck = ped_h + TURRET_DECK_THK
+    ear_h = EAR_PIVOT_H + EAR_TOP_R
+    ear_w = 2.0 * EAR_TOP_R
+    y_off = link_thk / 2.0 + FOREARM_THK / 2.0
+    ear_loops = [_rect(ear_w, FOREARM_THK, 0.0, s * y_off) for s in (-1.0, 1.0)]
+    sk3 = partdesign.add_sketch(doc, body, "ears_sk", points=ear_loops[0],
+                                loops=ear_loops[1:], z=z_deck)
+    p3 = body.newObject(types.PartDesign.Pad, "ears_pad")
+    p3.Profile = sk3
+    p3.Length = ear_h
+    doc.recompute()
+
+    z_piv = z_deck + EAR_PIVOT_H
+    bsk = partdesign.add_sketch(doc, body, "shoulder_bore",
+                                circles=[(0.0, z_piv, pin_dia)],
+                                placement=_xz_plane(0.0))
+    pkt = body.newObject(types.PartDesign.Pocket, "shoulder_bore_cut")
+    pkt.Profile = bsk
+    pkt.Type = "ThroughAll"
+    pkt.SideType = "Symmetric"
+    doc.recompute()
+
+
+def _build_link(doc, body, length, wid, thk, bores, relief_l,
+                cable_clip=False):
+    """a machined arm link: true rounded ends, bores, and a stadium relief slot."""
+    name = body.Name
+    pts = _rounded_rect(length + wid, wid, wid * 0.35)
+    partdesign.pad_and_bore(doc, body, pts, thk, bores)
+    r_w = wid * 0.44
+    span = max(4.0, relief_l - r_w)
+    rsk = partdesign.add_sketch(
+        doc, body, name + "_relief",
+        slots=[(-span / 2.0, 0.0, span / 2.0, 0.0, r_w)], z=thk / 2.0)
+    pkt = body.newObject(types.PartDesign.Pocket, name + "_relief_cut")
+    pkt.Profile = rsk
+    pkt.Type = "ThroughAll"
+    pkt.SideType = "Symmetric"
+    doc.recompute()
+    tip = pkt
+    if cable_clip:
+        # handed feature on the left forearm cheek only: cable-tie clip bore.
+        csk = partdesign.add_sketch(
+            doc, body, name + "_clip",
+            circles=[(0.0, wid * 0.34, CABLE_CLIP_DIA)], z=-thk / 2.0)
+        hole = body.newObject(types.PartDesign.Hole, name + "_clip_hole")
+        hole.Profile = csk
+        hole.Diameter = CABLE_CLIP_DIA
+        hole.DepthType = "ThroughAll"
+        hole.Reversed = True
+        doc.recompute()
+        tip = hole
+    _chamfer_z(doc, body, tip, thk / 2.0, CHAMFER_SM, name + "_bevel")
+
+
+def _build_bushing(doc, body, od, idia, length):
+    r_in, r_out, hl = idia / 2.0, od / 2.0, length / 2.0
+    prof = [(r_in, -hl), (r_out, -hl), (r_out, hl), (r_in, hl)]
+    sk = partdesign.add_sketch(doc, body, "bushing_sk", points=prof,
+                               placement=_xz_plane(0.0))
+    rev = body.newObject(types.PartDesign.Revolution, "bushing_rev")
+    rev.Profile = sk
+    rev.ReferenceAxis = (sk, ["V_Axis"])
+    rev.Angle = 360.0
+    doc.recompute()
+
+
+def _build_pivot_pin(doc, body, dia, stack_w):
+    """flanged steel pivot pin with an axial M3 blind bore at the far end."""
+    sr, hr, ht = dia / 2.0, (dia + PIN_HEAD_ADD) / 2.0, PIN_HEAD_THK
+    hl = stack_w / 2.0
+    prof = [(0.0, hl), (sr, hl), (sr, -hl), (hr, -hl),
+            (hr, -hl - ht), (0.0, -hl - ht)]
+    sk = partdesign.add_sketch(doc, body, "pin_sk", points=prof,
+                               placement=_xz_plane(0.0))
+    rev = body.newObject(types.PartDesign.Revolution, "pin_rev")
+    rev.Profile = sk
+    rev.ReferenceAxis = (sk, ["V_Axis"])
+    rev.Angle = 360.0
+    doc.recompute()
+
+    bsk = partdesign.add_sketch(doc, body, "pin_tap",
+                                circles=[(0.0, 0.0, M3_DIA)], z=hl)
+    pkt = body.newObject(types.PartDesign.Pocket, "pin_tap_cut")
+    pkt.Profile = bsk
+    pkt.Length = M3_GRIP - CAP_THK
+    doc.recompute()
+
+
+def _build_retainer_cap(doc, body):
+    sk = partdesign.add_sketch(doc, body, "cap_sk",
+                               circles=[(0.0, 0.0, CAP_DIA)], z=-CAP_THK / 2.0)
+    pad = body.newObject(types.PartDesign.Pad, "cap_pad")
+    pad.Profile = sk
+    pad.Length = CAP_THK
+    doc.recompute()
+    bsk = partdesign.add_sketch(doc, body, "cap_bore",
+                                circles=[(0.0, 0.0, M3_DIA)], z=-CAP_THK / 2.0)
+    hole = body.newObject(types.PartDesign.Hole, "cap_hole")
+    hole.Profile = bsk
+    hole.Diameter = M3_DIA
+    hole.DepthType = "ThroughAll"
+    hole.Reversed = True
+    doc.recompute()
+
+
+def _build_screw(doc, body, dia, grip, name):
+    """a turned pan-head fastener: head on +Z, shank hanging along -Z."""
+    sr = dia / 2.0
+    hr = dia * HEAD_SCALE / 2.0
+    ht = dia * HEAD_H_SCALE
+    prof = [(0.0, ht), (hr, ht), (hr, 0.0), (sr, 0.0), (sr, -grip), (0.0, -grip)]
+    sk = partdesign.add_sketch(doc, body, name + "_sk", points=prof,
+                               placement=_xz_plane(0.0))
+    rev = body.newObject(types.PartDesign.Revolution, name + "_rev")
+    rev.Profile = sk
+    rev.ReferenceAxis = (sk, ["V_Axis"])
+    rev.Angle = 360.0
+    doc.recompute()
+
+
+def _build_wrist_block(doc, body, link_wid, link_thk, bolt_y):
+    """back tang seated between forearm plates + front gripper rail flange."""
+    tang = _rect(link_wid, link_wid, 0.0, 0.0)
+    sk1 = partdesign.add_sketch(doc, body, "tang_sk", points=tang,
+                                placement=_xz_plane(0.0))
+    p1 = body.newObject(types.PartDesign.Pad, "tang_pad")
+    p1.Profile = sk1
+    p1.Length = link_thk
+    p1.SideType = "Symmetric"
+    doc.recompute()
+
+    flange = _rect(WRIST_RAIL_W, WRIST_RAIL_H, 0.0, 0.0)
+    sk2 = partdesign.add_sketch(doc, body, "flange_sk", points=flange,
+                                placement=_yz_plane(link_wid / 2.0))
+    p2 = body.newObject(types.PartDesign.Pad, "flange_pad")
+    p2.Profile = sk2
+    p2.Length = WRIST_FLANGE_T
+    doc.recompute()
+
+    for i, bx in enumerate((-6.0, 6.0), 1):
+        bsk = partdesign.add_sketch(doc, body, "wrist_bore%d" % i,
+                                    circles=[(bx, 0.0, M5_DIA)],
+                                    placement=_xz_plane(0.0))
+        pkt = body.newObject(types.PartDesign.Pocket, "wrist_bore%d_cut" % i)
+        pkt.Profile = bsk
+        pkt.Type = "ThroughAll"
+        pkt.SideType = "Symmetric"
+        doc.recompute()
+
+    x_front = link_wid / 2.0 + WRIST_FLANGE_T
+    for i, sy in enumerate((-1.0, 1.0), 1):
+        jsk = partdesign.add_sketch(doc, body, "jaw_tap%d" % i,
+                                    circles=[(sy * bolt_y, 0.0, M3_DIA)],
+                                    placement=_yz_plane(x_front))
+        pkt = body.newObject(types.PartDesign.Pocket, "jaw_tap%d_cut" % i)
+        pkt.Profile = jsk
+        pkt.Length = M3_GRIP - JAW_HEEL_T
+        doc.recompute()
+
+
+def _build_jaw(doc, body, wide=False):
+    """L-shaped gripper finger: bolted heel pad + offset tapered finger."""
+    hw = (JAW_THK + (2.0 if wide else 0.0)) / 2.0
+    sk1 = partdesign.add_sketch(doc, body, "jaw_heel_sk",
+                                points=_rect(2.0 * hw, JAW_H),
+                                placement=_yz_plane(0.0))
+    p1 = body.newObject(types.PartDesign.Pad, "jaw_heel_pad")
+    p1.Profile = sk1
+    p1.Length = JAW_HEEL_T
+    doc.recompute()
+
+    f_prof = [(JAW_HEEL_T, -JAW_H / 2.0), (JAW_LEN, -JAW_TIP_T),
+              (JAW_LEN, JAW_TIP_T), (JAW_HEEL_T, JAW_H / 2.0)]
+    y_mid = hw - JAW_FINGER_W / 2.0
+    sk2 = partdesign.add_sketch(doc, body, "jaw_finger_sk", points=f_prof,
+                                placement=_xz_plane(y_mid))
+    p2 = body.newObject(types.PartDesign.Pad, "jaw_finger_pad")
+    p2.Profile = sk2
+    p2.Length = JAW_FINGER_W
+    p2.SideType = "Symmetric"
+    doc.recompute()
+
+    bsk = partdesign.add_sketch(doc, body, "jaw_bore",
+                                circles=[(-JAW_BOLT_OFF, 0.0, M3_DIA)],
+                                placement=_yz_plane(JAW_HEEL_T))
+    pkt = body.newObject(types.PartDesign.Pocket, "jaw_bore_cut")
+    pkt.Profile = bsk
+    pkt.Length = JAW_HEEL_T
+    doc.recompute()
+
+
+def _frame_rot(theta_base, pitch_deg):
+    r_base = Rotation(Vector(0, 0, 1), theta_base)
+    r_pitch = Rotation(Vector(0, 1, 0), -pitch_deg)
+    return r_base.multiply(r_pitch)
+
+
+def _link_rot(theta_base, pitch_deg):
+    return _frame_rot(theta_base, pitch_deg).multiply(
+        Rotation(Vector(1, 0, 0), 90))
+
+
+def _pin_rot(theta_base):
+    return Rotation(Vector(0, 0, 1), theta_base).multiply(
+        Rotation(Vector(1, 0, 0), -90))
+
+
+def _joint_kit(bod, pd, lt, stack_w):
+    """reusable pivot-joint sub-assembly: bushing + pin + retainer cap + M3 screw."""
+    return fcad.SubAssembly("joint_kit", [
+        fcad.PartSpec("bushing", profile="bronze bushing %g/%g" % (bod, pd),
+                      length=lt, placements=[Placement()], rides="upper_arm",
+                      color=COL_BRONZE, material="bronze",
+                      unit_cost=2.40, mass_g=12.0,
+                      build=lambda doc, body: _build_bushing(doc, body, bod, pd, lt)),
+        fcad.PartSpec("pivot_pin", profile=_rod_label(pd),
+                      length=stack_w + PIN_HEAD_THK, placements=[Placement()],
+                      color=COL_STEEL, material="steel1045",
+                      mass_g=(3.14 * (pd / 2.0) ** 2 * stack_w) * RHO_STEEL,
+                      build=lambda doc, body: _build_pivot_pin(doc, body, pd, stack_w)),
+        fcad.PartSpec("retainer_cap", profile="steel cap", length=CAP_DIA,
+                      placements=[Placement(Vector(0, 0, stack_w / 2.0 + CAP_THK / 2.0),
+                                            Rotation())],
+                      rides="pivot_pin", color=COL_STEEL, material="steel1045",
+                      mass_g=4.5, build=_build_retainer_cap),
+        fcad.PartSpec("bolt_m3", profile="m3x%g screw" % M3_GRIP,
+                      length=M3_GRIP,
+                      placements=[Placement(Vector(0, 0, stack_w / 2.0 + CAP_THK),
+                                            Rotation())],
+                      embeds=True, color=COL_BOLT, unit_cost=0.15, mass_g=1.2,
+                      build=lambda doc, body: _build_screw(
+                          doc, body, M3_DIA, M3_GRIP, "bolt_m3")),
+    ])
+
+
+def compute(p):
+    bw, bh, wt = p["base_wid"], p["base_h"], p["wall_thk"]
+    ul, fl = p["upper_len"], p["forearm_len"]
+    lw, lt = p["link_wid"], p["link_thk"]
+    pd, bod = p["pin_dia"], p["bushing_od"]
+    tb, ts, te = p["theta_base"], p["theta_shoulder"], p["theta_elbow"]
+    jopen = p["jaw_open"]
+    wide = p["gripper_style"] == "wide"
+    jaw_w = JAW_THK + (2.0 if wide else 0.0)
+    jaw_y = jopen / 2.0 + jaw_w / 2.0
+    jaw_bolt_y = jaw_y + JAW_BOLT_OFF
+
+    shell_h = bh - 2.0 * wt
+    z_base_top = FOOT_H + wt
+    z_cover_top = z_base_top + shell_h + wt
+    ped_h = shell_h + wt + COVER_GAP
+    z_sh = z_base_top + ped_h + TURRET_DECK_THK + EAR_PIVOT_H
+
+    pitch1 = 90.0 - ts
+    pitch2 = pitch1 - te
+    r_base = Rotation(Vector(0, 0, 1), tb)
+    r_f1 = _frame_rot(tb, pitch1)
+    r_f2 = _frame_rot(tb, pitch2)
+    u1 = r_f1.multVec(Vector(1, 0, 0))
+    u2 = r_f2.multVec(Vector(1, 0, 0))
+    y_lat = r_base.multVec(Vector(0, 1, 0))
+
+    p_sh = Vector(0.0, 0.0, z_sh)
+    p_el = p_sh + u1 * ul
+    p_wr = p_el + u2 * fl
+    x_jaw = lw / 2.0 + WRIST_FLANGE_T
+    p_tip = p_wr + u2 * (x_jaw + JAW_LEN)
+
+    stack_w = lt + 2.0 * FOREARM_THK
+    y_fa = lt / 2.0 + FOREARM_THK / 2.0
+    upper_relief_l = ul - 2.0 * bod - 18.0
+    forearm_relief_l = fl - pd - lw - 18.0
+
+    r_l1 = _link_rot(tb, pitch1)
+    r_l2 = _link_rot(tb, pitch2)
+    r_pin = _pin_rot(tb)
+    r_cap_bolt = Rotation(Vector(0, 0, 1), tb).multiply(
+        Rotation(Vector(1, 0, 0), -90))
+    r_jaw_bolt = r_f2.multiply(Rotation(Vector(0, 1, 0), 90))
+    r_jaw_r = r_f2.multiply(Rotation(Vector(1, 0, 0), 180))
+
+    base_bolts = [Placement(Vector(cx, cy, z_cover_top), Rotation())
+                  for cx, cy, _ in _corner_bolts(bw)]
+    wrist_bolts = [Placement(p_wr + u2 * bx + y_lat * (stack_w / 2.0), r_cap_bolt)
+                   for bx in (-6.0, 6.0)]
+    jaw_places = [
+        Placement(p_wr + u2 * x_jaw - y_lat * jaw_y, r_f2),
+        Placement(p_wr + u2 * x_jaw + y_lat * jaw_y, r_jaw_r),
+    ]
+    jaw_bolts = [Placement(p_wr + u2 * (x_jaw + JAW_HEEL_T) + y_lat * (s * jaw_bolt_y),
+                           r_jaw_bolt) for s in (-1.0, 1.0)]
+
+    upper_bores = [(-ul / 2.0, 0.0, bod), (ul / 2.0, 0.0, bod)]
+    forearm_bores = [(-fl / 2.0, 0.0, pd),
+                     (fl / 2.0 - 6.0, 0.0, M5_DIA),
+                     (fl / 2.0 + 6.0, 0.0, M5_DIA)]
+    shell_flat = sheetmetal.unfold_box_tray(bw, bw, shell_h, wt, BEND_R)
+    motor_x = -(TURRET_PED_DIA / 2.0 + 16.0)
+
+    # place the reusable pivot joint kit at both shoulder and elbow.
+    joints_placed = _joint_kit(bod, pd, lt, stack_w).place([
+        Placement(p_sh, r_pin),
+        Placement(p_el, r_pin),
+    ])
+
+    jaw_m3 = fcad.PartSpec(
+        "bolt_m3", profile="m3x%g screw" % M3_GRIP, length=M3_GRIP,
+        placements=jaw_bolts, embeds=True, color=COL_BOLT,
+        unit_cost=0.15, mass_g=1.2,
+        build=lambda doc, body: _build_screw(doc, body, M3_DIA, M3_GRIP, "bolt_m3"))
+
+    base_specs = [
+        fcad.PartSpec("feet", profile="rubber pad", length=FOOT_SIZE,
+                      grounded=True, disjoint=True,
+                      color=COL_RUBBER, material="rubber",
+                      mass_g=4.0 * FOOT_SIZE * FOOT_SIZE * FOOT_H * RHO_RUBBER,
+                      build=lambda doc, body: _build_feet(doc, body, bw)),
+        fcad.PartSpec("base_plate", profile=_plate_label(wt), length=bw,
+                      sheet_size=(bw, bw),
+                      placements=Placement(Vector(0, 0, FOOT_H + wt / 2.0),
+                                           Rotation()),
+                      color=COL_AL_RAW, material="al6061",
+                      mass_g=bw * bw * wt * RHO_AL,
+                      build=lambda doc, body: _build_base_plate(doc, body, bw, wt)),
+        fcad.PartSpec("base_shell", profile=_plate_label(wt), length=bw,
+                      flat_pattern=shell_flat,
+                      placements=Placement(Vector(0, 0, z_base_top + shell_h / 2.0),
+                                           Rotation()),
+                      openings=["cable_port"], color=COL_AL_DARK, material="al6061",
+                      mass_g=(bw * bw - (bw - 2 * FRAME_W) ** 2) * shell_h * RHO_AL,
+                      build=lambda doc, body: _build_base_shell(doc, body, bw, shell_h)),
+        fcad.PartSpec("base_cover", profile=_pc_label(wt), length=bw,
+                      sheet_size=(bw, bw),
+                      placements=Placement(Vector(0, 0, z_cover_top - wt / 2.0),
+                                           Rotation()),
+                      color=COL_COVER, transparency=80, material="polycarbonate",
+                      mass_g=bw * bw * wt * RHO_PC,
+                      build=lambda doc, body: _build_base_cover(doc, body, bw, wt)),
+        fcad.PartSpec.from_step(
+            "base_motor", MOTOR_STEP,
+            placements=Placement(Vector(motor_x, 0.0, z_base_top), Rotation()),
+            profile="NEMA-17 stepper", sku="17HS4401",
+            unit_cost=14.50, mass_g=280.0, length=28.0,
+            color=COL_MOTOR, material="steel1045"),
+        fcad.PartSpec("turret", profile="al turret", length=TURRET_DECK_DIA,
+                      placements=Placement(Vector(0, 0, z_base_top), r_base),
+                      color=COL_AL_BLUE, material="al6061", mass_g=340.0,
+                      build=lambda doc, body: _build_turret(doc, body, ped_h, lt, pd)),
+        fcad.PartSpec("upper_arm", profile=_bar_label(lw, lt), length=ul + lw,
+                      placements=Placement(p_sh + u1 * (ul / 2.0), r_l1),
+                      dimension_sketches=["*_bore*"],
+                      openings=["*_relief"], color=COL_AL_RAW,
+                      material="al6061",
+                      mass_g=((ul + lw) * lw - upper_relief_l * lw * 0.44) * lt * RHO_AL,
+                      build=lambda doc, body: _build_link(
+                          doc, body, ul, lw, lt, upper_bores, upper_relief_l)),
+        # handed left/right forearm twins: left cheek carries a cable-clip bore.
+        fcad.PartSpec("forearm_left", profile=_bar_label(lw, FOREARM_THK),
+                      bom_group="forearm", length=fl + lw,
+                      placements=Placement(p_el + u2 * (fl / 2.0) - y_lat * y_fa, r_l2),
+                      dimension_sketches=["*_bore1", "*_clip"],
+                      openings=["*_relief", "*_clip"],
+                      color=COL_AL_RAW, material="al6061",
+                      mass_g=((fl + lw) * lw - forearm_relief_l * lw * 0.44)
+                      * FOREARM_THK * RHO_AL,
+                      build=lambda doc, body: _build_link(
+                          doc, body, fl, lw, FOREARM_THK, forearm_bores,
+                          forearm_relief_l, cable_clip=True)),
+        fcad.PartSpec("forearm_right", profile=_bar_label(lw, FOREARM_THK),
+                      bom_group="forearm", length=fl + lw,
+                      placements=Placement(p_el + u2 * (fl / 2.0) + y_lat * y_fa, r_l2),
+                      dimension_sketches=["*_bore1"],
+                      openings=["*_relief"],
+                      color=COL_AL_RAW, material="al6061",
+                      mass_g=((fl + lw) * lw - forearm_relief_l * lw * 0.44)
+                      * FOREARM_THK * RHO_AL,
+                      build=lambda doc, body: _build_link(
+                          doc, body, fl, lw, FOREARM_THK, forearm_bores,
+                          forearm_relief_l)),
+        fcad.PartSpec("wrist_block", profile=_bar_label(lw, lt),
+                      length=lw + WRIST_FLANGE_T,
+                      placements=Placement(p_wr, r_f2), color=COL_AL_BLUE,
+                      material="al6061", mass_g=65.0,
+                      build=lambda doc, body: _build_wrist_block(
+                          doc, body, lw, lt, jaw_bolt_y)),
+        fcad.PartSpec("jaw", profile="al jaw", length=JAW_LEN,
+                      placements=jaw_places, color=COL_JAW, material="al6061",
+                      mass_g=14.0,
+                      build=lambda doc, body: _build_jaw(doc, body, wide=wide)),
+        fcad.PartSpec("bolt_m5", profile="m5x%g screw" % bh, length=bh,
+                      placements=base_bolts, embeds=True, color=COL_BOLT,
+                      unit_cost=0.35, mass_g=7.0,
+                      build=lambda doc, body: _build_screw(
+                          doc, body, M5_DIA, bh, "bolt_m5")),
+        fcad.PartSpec("wrist_bolt", profile="m5x%g screw" % stack_w,
+                      length=stack_w, placements=wrist_bolts, embeds=True,
+                      color=COL_BOLT, unit_cost=0.25, mass_g=4.5,
+                      build=lambda doc, body: _build_screw(
+                          doc, body, M5_DIA, stack_w, "wrist_bolt")),
+    ]
+
+    specs = fcad.compose(base_specs, joints_placed, jaw_m3)
+    return {
+        "specs": specs,
+        "reach": ul + fl,
+        "upper_relief_l": upper_relief_l,
+        "forearm_relief_l": forearm_relief_l,
+        "tip_z": p_tip.z,
+        "shoulder": p_sh,
+        "elbow": p_el,
+        "wrist": p_wr,
+    }
+
+
+def ASSEMBLE(doc, asm, links):
+    """kinematic joints at the 3 arm axes + sliding gripper jaws."""
+    asmlib.joint(doc, asm, "Rev_base", "Revolute",
+                 links["base_plate"][0], links["turret"][0])
+    asmlib.joint(doc, asm, "Rev_shoulder", "Revolute",
+                 links["turret"][0], links["upper_arm"][0])
+    asmlib.joint(doc, asm, "Rev_elbow_L", "Revolute",
+                 links["upper_arm"][0], links["forearm_left"][0])
+    asmlib.joint(doc, asm, "Rev_elbow_R", "Revolute",
+                 links["upper_arm"][0], links["forearm_right"][0])
+    for i, jw in enumerate(links["jaw"], 1):
+        asmlib.joint(doc, asm, "Slide_jaw_%d" % i, "Slider",
+                     links["wrist_block"][0], jw)
+    asmlib.fix_remaining(doc, asm, links, links["feet"][0])
